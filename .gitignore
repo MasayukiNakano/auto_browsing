@@ -1,0 +1,23 @@
+.DS_Store
+
+# Swift Package Manager artifacts
+macos-app/.build/
+macos-app/.swiftpm/
+macos-app/DerivedData/
+
+# Xcode project user data
+xcuserdata/
+DerivedData/
+
+# Java build artifacts
+java-strategy/.gradle/
+java-strategy/build/
+
+# Link outputs
+links-output/
+
+# Editor swap files
+*.swp
+*.swo
+
+.netrc

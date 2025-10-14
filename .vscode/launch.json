@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:auto_browsing}/macos-app",
+            "name": "Debug AutoBrowsingApp (macos-app)",
+            "program": "${workspaceFolder:auto_browsing}/macos-app/.build/debug/AutoBrowsingApp",
+            "preLaunchTask": "swift: Build Debug AutoBrowsingApp (macos-app)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:auto_browsing}/macos-app",
+            "name": "Release AutoBrowsingApp (macos-app)",
+            "program": "${workspaceFolder:auto_browsing}/macos-app/.build/release/AutoBrowsingApp",
+            "preLaunchTask": "swift: Build Release AutoBrowsingApp (macos-app)"
+        }
+    ]
+}
