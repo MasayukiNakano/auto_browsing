@@ -1,0 +1,37 @@
+[
+  {
+    "identifier": "generic",
+    "displayName": "汎用スクロール",
+    "urlPattern": ".*",
+    "strategy": {
+      "type": "fallback",
+      "options": {
+        "scrollDistance": "480",
+        "waitInterval": "2.5"
+      }
+    }
+  },
+  {
+    "identifier": "demo-news",
+    "displayName": "ニュースサイト例",
+    "urlPattern": "news\\.example\\.com",
+    "strategy": {
+      "type": "cssSelector",
+      "options": {
+        "selectors": "button.load-more, a.load-more"
+      }
+    }
+  },
+  {
+    "identifier": "bloomberg",
+    "displayName": "Bloomberg",
+    "urlPattern": "www\\.bloomberg\\.(com|co\\.jp)",
+    "strategy": {
+      "type": "textMatch",
+      "options": {
+        "phrase": "more stories",
+        "cleanupScriptKey": "bloombergCleanup"
+      }
+    }
+  }
+]
