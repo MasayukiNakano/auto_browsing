@@ -18,6 +18,14 @@ final class AppState: ObservableObject {
     @Published var lastCleanupLimit: Int? = nil
     @Published var lastCleanupError: String? = nil
     @Published var lastCleanupSiteName: String? = nil
+    @Published var linksInputDirectory: String
+    @Published var linksAggregatedDirectory: String
+    @Published var aggregationStatusMessage: String = ""
+    @Published var aggregationLog: String = ""
+    @Published var isAggregatingLinks: Bool = false
+    @Published var aggregatorScriptLocation: String? = nil
+    @Published var pythonBinaryPath: String = "/usr/bin/python3"
+    @Published var keepTimestampOnAggregation: Bool = true
 
     private let safariController = SafariAccessibilityController()
     private let automationEngine = ScrollAutomationEngine()
@@ -25,7 +33,12 @@ final class AppState: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
 
     init() {
+        let defaults = AppState.defaultLinkDirectories()
+        self.linksInputDirectory = defaults.input
+        self.linksAggregatedDirectory = defaults.output
+
         wireBindings()
+        refreshAggregatorScriptLocation()
     }
 
     func refreshSafariState() {
@@ -145,6 +158,86 @@ final class AppState: ObservableObject {
         }
     }
 
+    func aggregateLinks() {
+        guard !isAggregatingLinks else { return }
+
+        let fileManager = FileManager.default
+        let basePath = linksInputDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        let outputPath = linksAggregatedDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard fileManager.fileExists(atPath: basePath) else {
+            aggregationStatusMessage = "入力ディレクトリが見つかりません: \(basePath)"
+            return
+        }
+
+        guard let scriptPath = locateAggregatorScript() else {
+            aggregationStatusMessage = "aggregate_links.py が見つかりませんでした"
+            aggregatorScriptLocation = nil
+            return
+        }
+        aggregatorScriptLocation = scriptPath
+
+        aggregationStatusMessage = "集計を実行中..."
+        aggregationLog = ""
+        isAggregatingLinks = true
+
+        let pythonPath = pythonBinaryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keepTimestamp = keepTimestampOnAggregation
+
+        Task.detached { [weak self] in
+            guard let self else { return }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: pythonPath)
+            var arguments: [String] = [scriptPath, "--base", basePath, "--output", outputPath]
+            if keepTimestamp {
+                arguments.append("--keep-timestamp")
+            }
+            process.arguments = arguments
+            process.currentDirectoryURL = URL(fileURLWithPath: basePath)
+
+            let stdoutPipe = Pipe()
+            let stderrPipe = Pipe()
+            process.standardOutput = stdoutPipe
+            process.standardError = stderrPipe
+
+            do {
+                try process.run()
+            } catch {
+                await MainActor.run {
+                    self.aggregationStatusMessage = "プロセスの起動に失敗しました: \(error.localizedDescription)"
+                    self.isAggregatingLinks = false
+                }
+                return
+            }
+
+            process.waitUntilExit()
+
+            let outputData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+
+            let outputText = String(data: outputData, encoding: .utf8) ?? ""
+            let errorText = String(data: errorData, encoding: .utf8) ?? ""
+            let combinedLog = [outputText, errorText]
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .joined(separator: "\n")
+
+            let status = process.terminationStatus == 0
+            await MainActor.run {
+                self.aggregationLog = combinedLog
+                if status {
+                    self.aggregationStatusMessage = "集計が完了しました"
+                } else {
+                    self.aggregationStatusMessage = "集計に失敗しました (終了コード: \(process.terminationStatus))"
+                }
+                self.isAggregatingLinks = false
+            }
+        }
+    }
+
+    func refreshAggregatorScriptLocation() {
+        aggregatorScriptLocation = locateAggregatorScript()
+    }
+
     private func selectSiteIfMatching(url: String) {
         guard !siteProfiles.isEmpty else { return }
         let matches = siteProfiles.compactMap { profile -> (SiteProfile, Int)? in
@@ -165,6 +258,56 @@ final class AppState: ObservableObject {
     private func matchPriority(for profile: SiteProfile) -> Int {
         if profile.urlPattern == ".*" { return Int.min }
         return profile.urlPattern.replacingOccurrences(of: "\\\\", with: "").count
+    }
+
+    private static func defaultLinkDirectories() -> (input: String, output: String) {
+        let current = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let input = current
+            .appendingPathComponent("java-strategy")
+            .appendingPathComponent("build")
+            .appendingPathComponent("install")
+            .appendingPathComponent("load-more-strategy")
+            .appendingPathComponent("bin")
+            .appendingPathComponent("links-output")
+            .path
+        let output = URL(fileURLWithPath: input)
+            .appendingPathComponent("aggregated")
+            .path
+        return (input, output)
+    }
+
+    private func locateAggregatorScript() -> String? {
+        let fileManager = FileManager.default
+        var candidates: [String] = []
+
+        if let envPath = ProcessInfo.processInfo.environment["AUTO_BROWSING_AGGREGATOR"] {
+            candidates.append(envPath)
+        }
+
+        let cwd = FileManager.default.currentDirectoryPath
+        candidates.append(contentsOf: [
+            "\(cwd)/scripts/aggregate_links.py",
+            "\(cwd)/../scripts/aggregate_links.py",
+            "\(cwd)/../../scripts/aggregate_links.py"
+        ])
+
+        if let bundleURL = Bundle.main.url(forResource: "aggregate_links", withExtension: "py", subdirectory: "scripts") {
+            candidates.append(bundleURL.path)
+        }
+
+        let bundleResourcePath = Bundle.main.bundleURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("Resources")
+        let bundleScriptInScripts = bundleResourcePath
+            .appendingPathComponent("scripts")
+            .appendingPathComponent("aggregate_links.py")
+            .path
+        let bundleScriptRoot = bundleResourcePath
+            .appendingPathComponent("aggregate_links.py")
+            .path
+        candidates.append(contentsOf: [bundleScriptInScripts, bundleScriptRoot])
+
+        return candidates.first(where: { fileManager.fileExists(atPath: $0) })
     }
 }
 
