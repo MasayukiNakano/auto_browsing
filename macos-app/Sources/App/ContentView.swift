@@ -8,6 +8,8 @@ struct ContentView: View {
                 .tabItem { Label("コントロール", systemImage: "slider.horizontal.3") }
             linkPanel
                 .tabItem { Label("リンク一覧", systemImage: "link") }
+            aggregationPanel
+                .tabItem { Label("データ集計", systemImage: "tray.full") }
         }
         .frame(minWidth: 600, minHeight: 440)
         .onAppear {
@@ -178,6 +180,82 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private var aggregationPanel: some View {
+        NavigationView {
+            Form {
+                Section(header: Text("入力ディレクトリ")) {
+                    TextField("links-output ディレクトリ", text: $appState.linksInputDirectory)
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        appState.refreshAggregatorScriptLocation()
+                    } label: {
+                        Label("パスを再検出", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(appState.isAggregatingLinks)
+                }
+
+                Section(header: Text("出力ディレクトリ")) {
+                    TextField("集計結果の保存先", text: $appState.linksAggregatedDirectory)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                Section(header: Text("Python 実行環境")) {
+                    TextField("python コマンドパス", text: $appState.pythonBinaryPath)
+                        .textFieldStyle(.roundedBorder)
+                    Toggle("timestamp 列を保持する", isOn: $appState.keepTimestampOnAggregation)
+                }
+
+                Section(header: Text("スクリプト位置")) {
+                    if let path = appState.aggregatorScriptLocation {
+                        Text(path)
+                            .font(.caption)
+                            .textSelection(.enabled)
+                    } else {
+                        Text("aggregate_links.py が見つかっていません")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section(header: Text("操作")) {
+                    Button {
+                        appState.aggregateLinks()
+                    } label: {
+                        if appState.isAggregatingLinks {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .frame(width: 16, height: 16)
+                            Text("集計中…")
+                        } else {
+                            Label("集計を実行", systemImage: "play.rectangle")
+                        }
+                    }
+                    .disabled(appState.isAggregatingLinks)
+
+                    if !appState.aggregationStatusMessage.isEmpty {
+                        Text(appState.aggregationStatusMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if !appState.aggregationLog.isEmpty {
+                    Section(header: Text("ログ")) {
+                        ScrollView {
+                            Text(appState.aggregationLog)
+                                .font(.system(.caption, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        .frame(minHeight: 160)
+                    }
+                }
+            }
+            .navigationTitle("リンク集計")
+        }
+        .padding()
     }
 
     private func strategyDescription(for strategy: StrategyReference) -> String {
