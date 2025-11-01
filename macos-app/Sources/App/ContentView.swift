@@ -644,12 +644,17 @@ struct ContentView: View {
                     } else {
                         ForEach(appState.marketWatchArticles) { article in
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(article.href)
+                                Text(article.url)
                                     .font(.caption)
                                     .textSelection(.enabled)
-                                if let title = article.title, !title.isEmpty {
-                                    Text(title)
+                                if let headline = article.headline, !headline.isEmpty {
+                                    Text(headline)
                                         .font(.callout)
+                                }
+                                if let published = article.publishedAt, !published.isEmpty {
+                                    Text(published)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
                                 }
                                 Text(article.feed.feedLabel)
                                     .font(.caption2)
@@ -660,7 +665,7 @@ struct ContentView: View {
                                         .foregroundStyle(.secondary)
                                     Spacer()
                                     Button("開く") {
-                                        appState.openURLInSafari(article.href)
+                                        appState.openURLInSafari(article.url)
                                     }
                                     .buttonStyle(.borderedProminent)
                                 }

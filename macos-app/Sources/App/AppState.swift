@@ -35,9 +35,10 @@ enum MarketWatchFeedOption: String, CaseIterable, Identifiable, Hashable {
 
 struct MarketWatchArticle: Identifiable, Hashable {
     let id: String
-    let href: String
+    let url: String
+    let headline: String?
+    let publishedAt: String?
     let pageNumber: Int
-    let title: String?
     let feed: MarketWatchFeedOption
 }
 
@@ -176,7 +177,7 @@ final class AppState: ObservableObject {
     private var loggerObserver: NSObjectProtocol?
 
     private var marketWatchTask: Task<Void, Never>? = nil
-    private var marketWatchSeenLinks: Set<String> = []
+    private var marketWatchSeenArticleIds: Set<String> = []
     private var marketWatchFetchCount: Int = 0
     private var marketWatchNextLongPause: Int = Int.random(in: 10...20)
     private var bloombergTask: Task<Void, Never>? = nil
@@ -461,14 +462,14 @@ final class AppState: ObservableObject {
             referencePageURL: marketWatchReference
         )
         if !knownMarketWatchLinks.isEmpty {
-            marketWatchSeenLinks = knownMarketWatchLinks
+            marketWatchSeenArticleIds = knownMarketWatchLinks
             marketWatchKnownCount = knownMarketWatchLinks.count
             prependStatusMessage("既存 MarketWatch リンクを \(marketWatchKnownCount) 件読み込みました")
-        } else if !marketWatchSeenLinks.isEmpty {
-            marketWatchKnownCount = marketWatchSeenLinks.count
+        } else if !marketWatchSeenArticleIds.isEmpty {
+            marketWatchKnownCount = marketWatchSeenArticleIds.count
             prependStatusMessage("既存 MarketWatch リンクはキャッシュから \(marketWatchKnownCount) 件保持されています")
         } else {
-            marketWatchSeenLinks.removeAll()
+            marketWatchSeenArticleIds.removeAll()
             marketWatchKnownCount = 0
             prependStatusMessage("既存 MarketWatch リンクは見つかりませんでした")
         }
@@ -620,30 +621,37 @@ final class AppState: ObservableObject {
             do {
                 try await openMarketWatchPage(urlString: urlString, pageNumber: pageNumber)
 
-                let snapshots = safariController.collectLinks(selector: "div.element--article a.link")
+                let snapshots = safariController.collectMarketWatchLinks(limit: 400)
                 let articles = snapshots.map { snapshot in
-                    MarketWatchArticle(id: snapshot.href, href: snapshot.href, pageNumber: pageNumber, title: snapshot.text, feed: feed)
+                    MarketWatchArticle(
+                        id: snapshot.href,
+                        url: snapshot.href,
+                        headline: snapshot.text,
+                        publishedAt: snapshot.publishedAt,
+                        pageNumber: pageNumber,
+                        feed: feed
+                    )
                 }
-                let newLinks = articles.filter { article in
-                    marketWatchSeenLinks.insert(article.href).inserted
+                let newArticles = articles.filter { article in
+                    marketWatchSeenArticleIds.insert(article.url).inserted
                 }
-                let duplicateDetected = newLinks.count < articles.count
+                let duplicateDetected = newArticles.count < articles.count
 
-                if !newLinks.isEmpty {
-                    marketWatchArticles.append(contentsOf: newLinks)
+                if !newArticles.isEmpty {
+                    marketWatchArticles.append(contentsOf: newArticles)
                     marketWatchArticles.sort { lhs, rhs in
                         if lhs.pageNumber == rhs.pageNumber {
-                            return lhs.href < rhs.href
+                            return lhs.url < rhs.url
                         }
                         return lhs.pageNumber < rhs.pageNumber
                     }
                     if marketWatchArticles.count > 10 {
                         marketWatchArticles = Array(marketWatchArticles.suffix(10))
                     }
-                    prependStatusMessage("\(feedDisplayName(for: feed)) ページ \(pageNumber) から \(newLinks.count) 件のリンクを取得しました")
-                    persistMarketWatchLinks(newLinks, pageURL: urlString, feed: feed)
-                    marketWatchSessionNewCount += newLinks.count
-                    marketWatchSessionDuplicateCount += (articles.count - newLinks.count)
+                    prependStatusMessage("\(feedDisplayName(for: feed)) ページ \(pageNumber) から \(newArticles.count) 件のリンクを取得しました")
+                    persistMarketWatchLinks(newArticles, pageURL: urlString, feed: feed)
+                    marketWatchSessionNewCount += newArticles.count
+                    marketWatchSessionDuplicateCount += (articles.count - newArticles.count)
                     if haltOnDuplicate && duplicateDetected {
                         prependStatusMessage("重複判定により MarketWatch クロールを停止します")
                         break
@@ -733,7 +741,13 @@ final class AppState: ObservableObject {
 
     private func persistMarketWatchLinks(_ articles: [MarketWatchArticle], pageURL: String, feed: MarketWatchFeedOption) {
         guard !articles.isEmpty else { return }
-        let snapshots = articles.map { StrategyLinkSnapshot(href: $0.href, text: $0.title) }
+        let snapshots = articles.map {
+            StrategyLinkSnapshot(
+                href: $0.url,
+                text: $0.headline,
+                publishedAt: $0.publishedAt
+            )
+        }
         Task { [weak self] in
             guard let self else { return }
             await self.strategyClient.recordLinks(siteId: feed.siteIdentifier, pageURL: pageURL, links: snapshots)
