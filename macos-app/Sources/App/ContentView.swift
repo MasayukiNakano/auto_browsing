@@ -61,6 +61,7 @@ struct ContentView: View {
                 siteStatusSection
                 automationControls
                 statusBox
+                statusHistoryBox
                 retryStatusBox
                 articleCountBox
                 cleanupBox
@@ -192,7 +193,14 @@ struct ContentView: View {
     }
 
     private var statusBox: some View {
-        GroupBox("ステータス") {
+        GroupBox("現在の状態") {
+            Text(appState.liveStatusMessage.isEmpty ? "待機中" : appState.liveStatusMessage)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var statusHistoryBox: some View {
+        GroupBox("最近のログ") {
             if appState.statusMessages.isEmpty {
                 Text("メッセージはまだありません")
                     .foregroundStyle(.secondary)
@@ -200,6 +208,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(appState.statusMessages.enumerated()), id: \.offset) { _, message in
                         Text(message)
+                            .font(.caption)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -383,6 +392,30 @@ struct ContentView: View {
         }
     }
 
+    private var bloombergStatusSummary: String? {
+        guard let offset = appState.bloombergLastOffsetFetched else { return nil }
+        let feedLabel = appState.bloombergLastFetchFeed?.displayName ?? appState.bloombergFeed.displayName
+        return "最終取得オフセット (\(feedLabel)): \(offset)"
+    }
+
+    private var bloombergErrorSummary: String? {
+        guard let message = appState.bloombergErrorMessage, !message.isEmpty else { return nil }
+        let feedLabel = appState.bloombergLastFetchFeed?.displayName ?? appState.bloombergFeed.displayName
+        return "エラー (\(feedLabel)): \(message)"
+    }
+
+    private var marketWatchStatusSummary: String? {
+        guard let page = appState.marketWatchLastPageFetched else { return nil }
+        let feedLabel = appState.marketWatchLastFetchFeed?.feedLabel ?? appState.marketWatchFeed.feedLabel
+        return "最終取得ページ (\(feedLabel)): \(page)"
+    }
+
+    private var marketWatchErrorSummary: String? {
+        guard let message = appState.marketWatchErrorMessage, !message.isEmpty else { return nil }
+        let feedLabel = appState.marketWatchLastFetchFeed?.feedLabel ?? appState.marketWatchFeed.feedLabel
+        return "エラー (\(feedLabel)): \(message)"
+    }
+
     private var bloombergPanel: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -444,45 +477,13 @@ struct ContentView: View {
                             .padding(.vertical, 4)
                         }
 
-                        GroupBox("操作") {
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Button(action: appState.startBloombergCrawl) {
-                                        Label("開始", systemImage: "play.fill")
-                                    }
-                                    .disabled(appState.bloombergIsCrawling)
-
-                                    Button(action: appState.stopBloombergCrawl) {
-                                        Label("停止", systemImage: "stop.fill")
-                                    }
-                                    .disabled(!appState.bloombergIsCrawling)
-                                }
-
-                                if appState.bloombergIsCrawling {
-                                    HStack {
-                                        ProgressView()
-                                        Text("実行中")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-
-                                if let offset = appState.bloombergLastOffsetFetched {
-                                    let feedLabel = appState.bloombergLastFetchFeed?.displayName ?? appState.bloombergFeed.displayName
-                                    Text("最終取得オフセット (\(feedLabel)): \(offset)")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-
-                                if let error = appState.bloombergErrorMessage {
-                                    let feedLabel = appState.bloombergLastFetchFeed?.displayName ?? appState.bloombergFeed.displayName
-                                    Text("エラー (\(feedLabel)): \(error)")
-                                        .foregroundColor(.red)
-                                        .font(.caption)
-                                }
-                            }
-                            .padding(.vertical, 4)
-                        }
+                        crawlerControlsBox(
+                            isRunning: appState.bloombergIsCrawling,
+                            startAction: appState.startBloombergCrawl,
+                            stopAction: appState.stopBloombergCrawl,
+                            statusText: bloombergStatusSummary,
+                            errorText: bloombergErrorSummary
+                        )
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)
 
@@ -491,42 +492,40 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
 
-                GroupBox("取得済み記事 (最新 \(appState.bloombergArticles.count) 件)") {
-                    if appState.bloombergArticles.isEmpty {
-                        Text("記事はまだ取得されていません")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(appState.bloombergArticles) { article in
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(article.headline ?? "(タイトルなし)")
-                                    .font(.headline)
-                                if let published = article.publishedAt, !published.isEmpty {
-                                    Text("公開日: \(published)")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Text(article.url)
-                                    .font(.caption)
-                                    .textSelection(.enabled)
-                                HStack {
-                                    Text(article.feed.displayName)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    Text("オフセット \(article.offset)")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    Button("開く") {
-                                        appState.openURLInSafari(article.url)
-                                    }
-                                    .buttonStyle(.borderedProminent)
-                                }
+                statusHistoryBox
+
+                articleHistoryBox(
+                    title: "取得済み記事",
+                    emptyMessage: "記事はまだ取得されていません",
+                    articles: appState.bloombergArticles
+                ) { article in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(article.headline ?? "(タイトルなし)")
+                            .font(.headline)
+                        if let published = article.publishedAt, !published.isEmpty {
+                            Text("公開日: \(published)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(article.url)
+                            .font(.caption)
+                            .textSelection(.enabled)
+                        HStack {
+                            Text(article.feed.displayName)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("オフセット \(article.offset)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("開く") {
+                                appState.openURLInSafari(article.url)
                             }
-                            .padding(.vertical, 6)
-                            Divider()
+                            .buttonStyle(.borderedProminent)
                         }
                     }
+                    .padding(.vertical, 6)
                 }
             }
             .padding()
@@ -590,45 +589,13 @@ struct ContentView: View {
                             .padding(.vertical, 4)
                         }
 
-                        GroupBox("操作") {
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Button(action: appState.startMarketWatchCrawl) {
-                                        Label("開始", systemImage: "play.fill")
-                                    }
-                                    .disabled(appState.marketWatchIsCrawling)
-
-                                    Button(action: appState.stopMarketWatchCrawl) {
-                                        Label("停止", systemImage: "stop.fill")
-                                    }
-                                    .disabled(!appState.marketWatchIsCrawling)
-                                }
-
-                                if appState.marketWatchIsCrawling {
-                                    HStack {
-                                        ProgressView()
-                                        Text("実行中")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-
-                                if let page = appState.marketWatchLastPageFetched {
-                                    let feedLabel = appState.marketWatchLastFetchFeed?.feedLabel ?? appState.marketWatchFeed.feedLabel
-                                    Text("最終取得ページ (\(feedLabel)): \(page)")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-
-                                if let error = appState.marketWatchErrorMessage {
-                                    let feedLabel = appState.marketWatchLastFetchFeed?.feedLabel ?? appState.marketWatchFeed.feedLabel
-                                    Text("エラー (\(feedLabel)): \(error)")
-                                        .foregroundColor(.red)
-                                        .font(.caption)
-                                }
-                            }
-                            .padding(.vertical, 4)
-                        }
+                        crawlerControlsBox(
+                            isRunning: appState.marketWatchIsCrawling,
+                            startAction: appState.startMarketWatchCrawl,
+                            stopAction: appState.stopMarketWatchCrawl,
+                            statusText: marketWatchStatusSummary,
+                            errorText: marketWatchErrorSummary
+                        )
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)
 
@@ -637,43 +604,41 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
 
-                GroupBox("取得済みリンク (最新 \(appState.marketWatchArticles.count) 件)") {
-                    if appState.marketWatchArticles.isEmpty {
-                        Text("リンクはまだ取得されていません")
+                statusHistoryBox
+
+                articleHistoryBox(
+                    title: "取得済みリンク",
+                    emptyMessage: "リンクはまだ取得されていません",
+                    articles: appState.marketWatchArticles
+                ) { article in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(article.url)
+                            .font(.caption)
+                            .textSelection(.enabled)
+                        if let headline = article.headline, !headline.isEmpty {
+                            Text(headline)
+                                .font(.callout)
+                        }
+                        if let published = article.publishedAt, !published.isEmpty {
+                            Text(published)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(article.feed.feedLabel)
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(appState.marketWatchArticles) { article in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(article.url)
-                                    .font(.caption)
-                                    .textSelection(.enabled)
-                                if let headline = article.headline, !headline.isEmpty {
-                                    Text(headline)
-                                        .font(.callout)
-                                }
-                                if let published = article.publishedAt, !published.isEmpty {
-                                    Text(published)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Text(article.feed.feedLabel)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                HStack {
-                                    Text("ページ \(article.pageNumber)")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    Button("開く") {
-                                        appState.openURLInSafari(article.url)
-                                    }
-                                    .buttonStyle(.borderedProminent)
-                                }
+                        HStack {
+                            Text("ページ \(article.pageNumber)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("開く") {
+                                appState.openURLInSafari(article.url)
                             }
-                            .padding(.vertical, 4)
-                            Divider()
+                            .buttonStyle(.borderedProminent)
                         }
                     }
+                    .padding(.vertical, 4)
                 }
             }
             .padding()
@@ -781,6 +746,73 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding()
+    }
+
+    private func crawlerControlsBox(
+        isRunning: Bool,
+        startAction: @escaping () -> Void,
+        stopAction: @escaping () -> Void,
+        statusText: String?,
+        errorText: String?
+    ) -> some View {
+        GroupBox("操作") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Button(action: startAction) {
+                        Label("開始", systemImage: "play.fill")
+                    }
+                    .disabled(isRunning)
+
+                    Button(action: stopAction) {
+                        Label("停止", systemImage: "stop.fill")
+                    }
+                    .disabled(!isRunning)
+                }
+
+                if isRunning {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("実行中")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let statusText {
+                    Text(statusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let errorText {
+                    Text(errorText)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func articleHistoryBox<Data: RandomAccessCollection, Row: View>(
+        title: String,
+        emptyMessage: String,
+        articles: Data,
+        @ViewBuilder row: @escaping (Data.Element) -> Row
+    ) -> some View where Data.Element: Identifiable {
+        GroupBox("\(title) (最新 \(articles.count) 件)") {
+            if articles.isEmpty {
+                Text(emptyMessage)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(articles.enumerated()), id: \.element.id) { entry in
+                    row(entry.element)
+                    if entry.offset < articles.count - 1 {
+                        Divider()
+                    }
+                }
+            }
+        }
     }
 
     private func strategyDescription(for strategy: StrategyReference) -> String {

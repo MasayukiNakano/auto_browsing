@@ -116,6 +116,7 @@ final class AppState: ObservableObject {
     @Published var isJavaBridgeRunning: Bool = false
     @Published var safariDetected: Bool = false
     @Published var statusMessages: [String] = []
+    @Published var liveStatusMessage: String = "待機中"
     @Published var activationRetryLimit: Int = 3
     @Published var currentPageURL: String? = nil
     @Published var lastLinks: [StrategyLinkSnapshot] = []
@@ -304,6 +305,10 @@ final class AppState: ObservableObject {
         appendStatusLog(entry)
     }
 
+    private func updateLiveStatus(_ message: String) {
+        liveStatusMessage = message.isEmpty ? "待機中" : message
+    }
+
     private func runAutomationLoop() async {
         guard selectedSite != nil else {
             automationStatus = .idle
@@ -484,6 +489,7 @@ final class AppState: ObservableObject {
         marketWatchRetryCount = 0
         let feed = marketWatchFeed
         prependStatusMessage("\(feedDisplayName(for: feed)) クロールを開始します (開始ページ: \(marketWatchStartPage), ページ数: \(marketWatchMaxPages))")
+        updateLiveStatus("\(feedDisplayName(for: feed)) ページ \(marketWatchStartPage) の取得を準備中")
 
         let startPage = marketWatchStartPage
         let maxPages = marketWatchMaxPages
@@ -510,6 +516,7 @@ final class AppState: ObservableObject {
         marketWatchTask = nil
         let feed = marketWatchLastFetchFeed ?? marketWatchFeed
         prependStatusMessage("\(feedDisplayName(for: feed)) クロールを停止しました")
+        updateLiveStatus("\(feedDisplayName(for: feed)) クロールを停止しました")
     }
 
     func startBloombergCrawl() {
@@ -520,6 +527,7 @@ final class AppState: ObservableObject {
         if bloombergCrossFeedEnabled {
             feedsToProcess = BloombergFeedOption.allCases
             prependStatusMessage("Bloomberg 全カテゴリ横断モードを開始します (\(feedsToProcess.count) フィード)")
+            updateLiveStatus("Bloomberg 横断モードを開始しました")
         } else {
             feedsToProcess = [bloombergFeed]
         }
@@ -536,7 +544,11 @@ final class AppState: ObservableObject {
         let initialOffset = bloombergCrossFeedEnabled ? 0 : max(0, bloombergStartOffset)
         let maxPages = bloombergMaxPages
         if !bloombergCrossFeedEnabled, let feed = feedsToProcess.first {
-            prependStatusMessage("\(bloombergFeedDisplayName(for: feed)) クロールを開始します (開始オフセット: \(initialOffset), ページ数: \(maxPages))")
+            let message = "\(bloombergFeedDisplayName(for: feed)) クロールを開始します (開始オフセット: \(initialOffset), ページ数: \(maxPages))"
+            prependStatusMessage(message)
+            updateLiveStatus("\(bloombergFeedDisplayName(for: feed)) オフセット \(initialOffset) の取得を準備中")
+        } else if bloombergCrossFeedEnabled {
+            updateLiveStatus("Bloomberg 横断モード: 初期化中")
         }
         let stopOnDuplicate = bloombergCrossFeedEnabled ? true : haltOnDuplicate
 
@@ -553,6 +565,7 @@ final class AppState: ObservableObject {
             } catch {
                 self.bloombergIsCrawling = false
                 self.bloombergErrorMessage = "Safari ウィンドウ準備に失敗しました: \(error.localizedDescription)"
+                self.updateLiveStatus("Bloomberg クロールを開始できませんでした: \(error.localizedDescription)")
                 return
             }
             for (index, feed) in feedsToProcess.enumerated() {
@@ -561,17 +574,25 @@ final class AppState: ObservableObject {
                 self.prepareBloombergFeedStart(feed: feed, startOffset: startOffset)
                 if self.bloombergCrossFeedEnabled {
                     self.prependStatusMessage("Bloomberg 横断モード: \(self.bloombergFeedDisplayName(for: feed)) を処理します (開始オフセット: \(startOffset))")
+                    self.updateLiveStatus("Bloomberg 横断モード: \(self.bloombergFeedDisplayName(for: feed)) を処理中")
                 } else if index > 0 {
                     self.prependStatusMessage("\(self.bloombergFeedDisplayName(for: feed)) クロールを開始します (開始オフセット: \(startOffset), ページ数: \(maxPages))")
+                    self.updateLiveStatus("\(self.bloombergFeedDisplayName(for: feed)) オフセット \(startOffset) の取得を準備中")
                 }
                 let reason = await self.crawlBloomberg(startOffset: startOffset, maxPages: maxPages, feed: feed, stopOnDuplicate: stopOnDuplicate)
                 switch reason {
-                case .completed, .duplicateStop, .unexpectedResponse:
+                case .completed, .unexpectedResponse:
+                    self.updateLiveStatus("\(self.bloombergFeedDisplayName(for: feed)) クロールが完了しました")
+                    continue
+                case .duplicateStop:
+                    self.updateLiveStatus("\(self.bloombergFeedDisplayName(for: feed)) 重複検出のため終了しました")
                     continue
                 case .cancelled, .error:
+                    self.updateLiveStatus("\(self.bloombergFeedDisplayName(for: feed)) クロールが中断されました")
                     return
                 }
             }
+            self.updateLiveStatus("Bloomberg クロールを完了しました")
         }
     }
 
@@ -582,6 +603,7 @@ final class AppState: ObservableObject {
         bloombergTask = nil
         let feed = bloombergLastFetchFeed ?? bloombergFeed
         prependStatusMessage("\(bloombergFeedDisplayName(for: feed)) クロールを停止しました")
+        updateLiveStatus("\(bloombergFeedDisplayName(for: feed)) クロールを停止しました")
     }
 
     func revealLinksInputDirectory() {
@@ -612,10 +634,14 @@ final class AppState: ObservableObject {
 
         var offset = 0
         while offset < maxPages {
-            if Task.isCancelled || !marketWatchIsCrawling { break }
+            if Task.isCancelled || !marketWatchIsCrawling {
+                updateLiveStatus("\(feedDisplayName(for: feed)) クロールはキャンセルされました")
+                break
+            }
             let pageNumber = startPage + offset
             let urlString = "https://www.marketwatch.com/latest-news?pageNumber=\(pageNumber)&position=\(feed.positionQueryValue)&partial=true"
 
+            updateLiveStatus("\(feedDisplayName(for: feed)) ページ \(pageNumber) を取得中")
             prependStatusMessage("\(feedDisplayName(for: feed)) ページ \(pageNumber) を読み込み中")
 
             do {
@@ -652,14 +678,18 @@ final class AppState: ObservableObject {
                     persistMarketWatchLinks(newArticles, pageURL: urlString, feed: feed)
                     marketWatchSessionNewCount += newArticles.count
                     marketWatchSessionDuplicateCount += (articles.count - newArticles.count)
+                    updateLiveStatus("\(feedDisplayName(for: feed)) ページ \(pageNumber) の処理完了 (新規 \(newArticles.count) 件)")
                     if haltOnDuplicate && duplicateDetected {
                         prependStatusMessage("重複判定により MarketWatch クロールを停止します")
+                        updateLiveStatus("\(feedDisplayName(for: feed)) 重複検出のためクロールを停止しました")
                         break
                     }
                 } else {
                     prependStatusMessage("\(feedDisplayName(for: feed)) ページ \(pageNumber) で新規リンクはありませんでした")
+                    updateLiveStatus("\(feedDisplayName(for: feed)) ページ \(pageNumber) は新規リンクなし")
                     if haltOnDuplicate {
                         prependStatusMessage("重複判定により MarketWatch クロールを停止します")
+                        updateLiveStatus("\(feedDisplayName(for: feed)) 重複検出のためクロールを停止しました")
                         break
                     }
                 }
@@ -678,9 +708,11 @@ final class AppState: ObservableObject {
                     marketWatchNextLongPause = Int.random(in: 10...20)
                 }
 
+                updateLiveStatus("\(feedDisplayName(for: feed)) 次のページまで \(String(format: "%.1f", delay)) 秒待機中")
                 do {
                     try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 } catch {
+                    updateLiveStatus("\(feedDisplayName(for: feed)) クロール待機がキャンセルされました")
                     break
                 }
 
@@ -693,18 +725,22 @@ final class AppState: ObservableObject {
                     let remaining = autoRetryMaxAttempts - marketWatchRetryCount
                     let waitSeconds = max(1.0, autoRetryDelaySeconds)
                     prependStatusMessage("MarketWatch 再開まで \(String(format: "%.1f", waitSeconds)) 秒待機します (残り \(remaining))")
+                    updateLiveStatus("\(feedDisplayName(for: feed)) 再試行まで \(String(format: "%.1f", waitSeconds)) 秒待機中 (残り \(remaining))")
                     do {
                         try await Task.sleep(nanoseconds: UInt64(waitSeconds * 1_000_000_000))
                     } catch {
+                        updateLiveStatus("\(feedDisplayName(for: feed)) 再試行待機がキャンセルされました")
                         break
                     }
                     continue
                 }
+                updateLiveStatus("\(feedDisplayName(for: feed)) クロールを終了します (エラー)")
                 break
             }
         }
 
         prependStatusMessage("\(feedDisplayName(for: feed)) クロールを完了しました")
+        updateLiveStatus("\(feedDisplayName(for: feed)) クロールを完了しました")
     }
 
     private func openMarketWatchPage(urlString: String, pageNumber: Int) async throws {
@@ -766,8 +802,10 @@ final class AppState: ObservableObject {
                 break
             }
 
+            let feedName = bloombergFeedDisplayName(for: feed)
             let apiURL = "https://www.bloomberg.com/lineup-next/api/paginate?id=archive_story_list&page=\(feed.pageParameter)&offset=\(currentOffset)&variation=archive&type=lineup_content"
-            prependStatusMessage("\(bloombergFeedDisplayName(for: feed)) オフセット \(currentOffset) を取得中")
+            updateLiveStatus("\(feedName) オフセット \(currentOffset) を取得中")
+            prependStatusMessage("\(feedName) オフセット \(currentOffset) を取得中")
 
             do {
                 try await ensureSafariFrontmostForBloomberg()
@@ -828,6 +866,7 @@ final class AppState: ObservableObject {
                 if articles.isEmpty {
                     let warning = "Bloomberg 側が想定外の応答を返しました。Safari で手動認証後に再試行してください。"
                     prependStatusMessage(warning)
+                    updateLiveStatus("\(feedName) 想定外の応答を検出しました")
                     bloombergErrorMessage = "Bloomberg unexpected response"
                     bloombergResumeOffset = currentOffset
                     if autoRetryEnabled, bloombergRetryCount < autoRetryMaxAttempts {
@@ -835,14 +874,17 @@ final class AppState: ObservableObject {
                         let remaining = autoRetryMaxAttempts - bloombergRetryCount
                         let waitSeconds = max(1.0, autoRetryDelaySeconds)
                         prependStatusMessage("Bloomberg 再開まで \(String(format: "%.1f", waitSeconds)) 秒待機します (残り \(remaining))")
+                        updateLiveStatus("\(feedName) 再試行まで \(String(format: "%.1f", waitSeconds)) 秒待機中 (残り \(remaining))")
                         do {
                             try await Task.sleep(nanoseconds: UInt64(waitSeconds * 1_000_000_000))
                         } catch {
+                            updateLiveStatus("\(feedName) 再試行待機がキャンセルされました")
                             break
                         }
                         continue
                     } else if autoRetryEnabled {
                         prependStatusMessage("Bloomberg 自動再開の上限に達しました。Safari で手動対応後に再試行してください。")
+                        updateLiveStatus("\(feedName) 自動再開の上限に達しました")
                     }
                     break
                 }
@@ -867,11 +909,13 @@ final class AppState: ObservableObject {
                     bloombergSessionNewCount += newArticles.count
                     bloombergSessionDuplicateCount += (articles.count - newArticles.count)
                     bloombergRetryCount = 0
+                    updateLiveStatus("\(feedName) オフセット \(currentOffset) の処理完了 (新規 \(newArticles.count) 件)")
 
                     if stopOnDuplicate && duplicateDetected {
                         prependStatusMessage("重複判定により Bloomberg クロールを停止します")
                         bloombergResumeOffset = currentOffset
                         endReason = .duplicateStop
+                        updateLiveStatus("\(feedName) 重複検出のためクロールを停止しました")
                         break
                     }
 
@@ -882,9 +926,11 @@ final class AppState: ObservableObject {
                     bloombergLastOffsetFetched = currentOffset
                     bloombergLastFetchFeed = feed
                     bloombergResumeOffset = currentOffset
+                    updateLiveStatus("\(feedName) オフセット \(currentOffset) は新規リンクなし")
                     if stopOnDuplicate {
                         prependStatusMessage("重複判定により Bloomberg クロールを停止します")
                         endReason = .duplicateStop
+                        updateLiveStatus("\(feedName) 重複検出のためクロールを停止しました")
                         break
                     }
                     if articles.isEmpty {
@@ -894,15 +940,18 @@ final class AppState: ObservableObject {
                             let remaining = autoRetryMaxAttempts - bloombergRetryCount
                             let waitSeconds = max(1.0, autoRetryDelaySeconds)
                             prependStatusMessage("Bloomberg 再開まで \(String(format: "%.1f", waitSeconds)) 秒待機します (残り \(remaining))")
+                            updateLiveStatus("\(feedName) 再試行まで \(String(format: "%.1f", waitSeconds)) 秒待機中 (残り \(remaining))")
                             do {
                                 try await Task.sleep(nanoseconds: UInt64(waitSeconds * 1_000_000_000))
                             } catch {
                                 endReason = .cancelled
+                                updateLiveStatus("\(feedName) 再試行待機がキャンセルされました")
                                 break
                             }
                             continue
                         } else {
                             endReason = .unexpectedResponse
+                            updateLiveStatus("\(feedName) 想定外の応答により終了しました")
                             break
                         }
                     }
@@ -914,6 +963,7 @@ final class AppState: ObservableObject {
             } catch {
                 bloombergErrorMessage = error.localizedDescription
                 prependStatusMessage("\(bloombergFeedDisplayName(for: feed)) オフセット \(currentOffset) の取得に失敗しました: \(error.localizedDescription)")
+                updateLiveStatus("\(feedName) オフセット \(currentOffset) の取得に失敗しました")
                 bloombergLastOffsetFetched = currentOffset
                 bloombergResumeOffset = currentOffset
                 if autoRetryEnabled, bloombergRetryCount < autoRetryMaxAttempts {
@@ -921,15 +971,22 @@ final class AppState: ObservableObject {
                     let remaining = autoRetryMaxAttempts - bloombergRetryCount
                     let waitSeconds = max(1.0, autoRetryDelaySeconds)
                     prependStatusMessage("Bloomberg 再開まで \(String(format: "%.1f", waitSeconds)) 秒待機します (残り \(remaining))")
+                    updateLiveStatus("\(feedName) 再試行まで \(String(format: "%.1f", waitSeconds)) 秒待機中 (残り \(remaining))")
                     do {
                         try await Task.sleep(nanoseconds: UInt64(waitSeconds * 1_000_000_000))
                     } catch {
                         endReason = .cancelled
+                        updateLiveStatus("\(feedName) 再試行待機がキャンセルされました")
                         break
                     }
                     continue
                 }
                 endReason = Task.isCancelled || !bloombergIsCrawling ? .cancelled : .error
+                if endReason == .cancelled {
+                    updateLiveStatus("\(feedName) クロールがキャンセルされました")
+                } else {
+                    updateLiveStatus("\(feedName) クロールを終了します (エラー)")
+                }
                 break
             }
 
@@ -943,15 +1000,19 @@ final class AppState: ObservableObject {
                 bloombergNextLongPause = Int.random(in: 10...20)
             }
 
+            updateLiveStatus("\(feedName) 次のオフセットまで \(String(format: "%.1f", delay)) 秒待機中")
             do {
                 try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             } catch {
                 endReason = .cancelled
+                updateLiveStatus("\(feedName) 待機がキャンセルされました")
                 break
             }
         }
 
-        prependStatusMessage("\(bloombergFeedDisplayName(for: feed)) クロールを完了しました")
+        let finishedFeedName = bloombergFeedDisplayName(for: feed)
+        prependStatusMessage("\(finishedFeedName) クロールを完了しました")
+        updateLiveStatus("\(finishedFeedName) クロールを完了しました")
         return endReason
     }
 
