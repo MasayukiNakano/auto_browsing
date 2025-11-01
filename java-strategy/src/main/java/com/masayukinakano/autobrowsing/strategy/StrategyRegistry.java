@@ -19,6 +19,8 @@ public final class StrategyRegistry {
         registry.registerHost("news.example.com", new TextMatchStrategy(List.of("Load more")));
         registry.registerSite("bloomberg", new BloombergStrategy());
         registry.registerHost("www.bloomberg.com", new BloombergStrategy());
+        registry.registerSite("marketwatch", new TextMatchStrategy(List.of("see more", "See more", "See More")));
+        registry.registerHost("www.marketwatch.com", new TextMatchStrategy(List.of("see more", "See more", "See More")));
         return registry;
     }
 

@@ -5,6 +5,8 @@ enum CleanupScripts {
         switch key {
         case "bloombergCleanup":
             return bloomberg
+        case "marketwatchCleanup":
+            return marketwatch
         default:
             return nil
         }
@@ -28,6 +30,42 @@ enum CleanupScripts {
                 const container = node.closest('div[class^="styles_itemContainer"]') || node;
                 container.remove();
             });
+            return JSON.stringify({
+                removed: excess.length,
+                visibleBefore: visible.length,
+                limit: LIMIT
+            });
+        } catch (err) {
+            return JSON.stringify({
+                removed: 0,
+                error: (err && err.message) ? String(err.message) : String(err)
+            });
+        }
+    })();
+    """
+
+    private static let marketwatch = """
+    (function cleanupMarketWatchArticles() {
+        try {
+            const LIMIT = 60;
+            const candidates = Array.from(document.querySelectorAll('div.element--article'));
+            const visible = candidates.filter(node => node && node.offsetParent !== null);
+            if (visible.length <= LIMIT) {
+                return JSON.stringify({
+                    removed: 0,
+                    visibleBefore: visible.length,
+                    limit: LIMIT
+                });
+            }
+
+            const excess = visible.slice(0, visible.length - LIMIT);
+            excess.forEach(node => {
+                const container = node.closest('div.element--article') || node;
+                if (container && container.parentNode) {
+                    container.parentNode.removeChild(container);
+                }
+            });
+
             return JSON.stringify({
                 removed: excess.length,
                 visibleBefore: visible.length,

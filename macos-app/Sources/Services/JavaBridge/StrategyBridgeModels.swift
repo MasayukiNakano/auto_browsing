@@ -29,10 +29,12 @@ struct StrategyButtonSnapshot: Codable {
 struct StrategyLinkSnapshot: Codable {
     let href: String
     let text: String?
+    let publishedAt: String?
 
-    init(href: String, text: String?) {
+    init(href: String, text: String?, publishedAt: String? = nil) {
         self.href = href
         self.text = text
+        self.publishedAt = publishedAt
     }
 }
 
