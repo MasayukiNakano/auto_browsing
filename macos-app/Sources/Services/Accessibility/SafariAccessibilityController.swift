@@ -430,42 +430,54 @@ final class SafariAccessibilityController {
         }
     }
 
-    func collectMarketWatchLinks(pageNumber: Int, limit: Int = 400) -> [StrategyLinkSnapshot] {
+    func collectMarketWatchLinks(pageNumber _: Int = 0, limit: Int = 400) -> [StrategyLinkSnapshot] {
         let jsTemplate = #"""
-        (function fetchMarketWatchLinks() {
-            const pageNumber = PAGE_NUMBER_PLACEHOLDER;
-            const url = `https://www.marketwatch.com/latest-news?pageNumber=${pageNumber}&position=1.1.0&partial=true`;
-            return fetch(url, { credentials: 'include' })
-                .then(resp => resp.text())
-                .then(html => {
-                    try {
-                        const container = document.createElement('div');
-                        container.innerHTML = html;
-                        const seen = new Set();
-                        const items = [];
-                        const anchors = container.querySelectorAll('div.element--article a.link[href]');
-                        for (let i = 0; i < anchors.length; i += 1) {
-                            const a = anchors[i];
-                            let href = a.href || a.getAttribute('href');
-                            if (!href) { continue; }
-                            try { href = new URL(href, window.location.href).href; } catch (err) {}
-                            if (!href || seen.has(href)) { continue; }
-                            seen.add(href);
-                            const text = (a.innerText || '').trim();
-                            items.push({ href, text });
-                            if (items.length >= LIMIT_PLACEHOLDER) { break; }
+        (function collectMarketWatchArticles() {
+            try {
+                const seen = new Set();
+                const items = [];
+                const containers = document.querySelectorAll("div.element--article");
+                for (let i = 0; i < containers.length; i += 1) {
+                    const container = containers[i];
+                    const anchor = container.querySelector("a.link[href]");
+                    if (!anchor) { continue; }
+                    let href = anchor.href || anchor.getAttribute("href");
+                    if (!href) { continue; }
+                    try { href = new URL(href, window.location.href).href; } catch (err) {}
+                    if (!href || seen.has(href)) { continue; }
+                    seen.add(href);
+
+                    const text = (anchor.innerText || anchor.textContent || "").trim();
+                    let publishedAt = null;
+                    const timeCandidate = container.querySelector("time[datetime], time[data-est], span.article__timestamp, span.timestamp__time, span.timestamp__date");
+                    if (timeCandidate) {
+                        const attrs = ["datetime", "data-est", "data-timestamp", "title"];
+                        for (let j = 0; j < attrs.length; j += 1) {
+                            const attrValue = timeCandidate.getAttribute(attrs[j]);
+                            if (attrValue && attrValue.trim()) {
+                                publishedAt = attrValue.trim();
+                                break;
+                            }
                         }
-                        return JSON.stringify(items);
-                    } catch (err) {
-                        return '[]';
+                        if (!publishedAt) {
+                            const raw = (timeCandidate.innerText || timeCandidate.textContent || "").trim();
+                            if (raw) {
+                                publishedAt = raw;
+                            }
+                        }
                     }
-                })
-                .catch(() => '[]');
+
+                    items.push({ href, text, publishedAt });
+                    if (items.length >= LIMIT_PLACEHOLDER) { break; }
+                }
+                return JSON.stringify(items);
+            } catch (err) {
+                return "[]";
+            }
         })();
         """#
 
         let js = jsTemplate
-            .replacingOccurrences(of: "PAGE_NUMBER_PLACEHOLDER", with: String(pageNumber))
             .replacingOccurrences(of: "LIMIT_PLACEHOLDER", with: String(limit))
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
