@@ -4,6 +4,7 @@
 macos-app/.build/
 macos-app/.swiftpm/
 macos-app/DerivedData/
+macos-app/dist/
 
 # Xcode project user data
 xcuserdata/
