@@ -229,8 +229,75 @@ final class SafariAccessibilityController {
         }
     }
 
-    func collectLinks(limit: Int = 400) -> [StrategyLinkSnapshot] {
+    func collectMarketWatchLinks(pageNumber: Int, limit: Int = 400) -> [StrategyLinkSnapshot] {
         let jsTemplate = #"""
+        (function fetchMarketWatchLinks() {
+            const pageNumber = PAGE_NUMBER_PLACEHOLDER;
+            const url = `https://www.marketwatch.com/latest-news?pageNumber=${pageNumber}&position=1.1.0&partial=true`;
+            return fetch(url, { credentials: 'include' })
+                .then(resp => resp.text())
+                .then(html => {
+                    try {
+                        const container = document.createElement('div');
+                        container.innerHTML = html;
+                        const seen = new Set();
+                        const items = [];
+                        const anchors = container.querySelectorAll('div.element--article a.link[href]');
+                        for (let i = 0; i < anchors.length; i += 1) {
+                            const a = anchors[i];
+                            let href = a.href || a.getAttribute('href');
+                            if (!href) { continue; }
+                            try { href = new URL(href, window.location.href).href; } catch (err) {}
+                            if (!href || seen.has(href)) { continue; }
+                            seen.add(href);
+                            const text = (a.innerText || '').trim();
+                            items.push({ href, text });
+                            if (items.length >= LIMIT_PLACEHOLDER) { break; }
+                        }
+                        return JSON.stringify(items);
+                    } catch (err) {
+                        return '[]';
+                    }
+                })
+                .catch(() => '[]');
+        })();
+        """#
+
+        let js = jsTemplate
+            .replacingOccurrences(of: "PAGE_NUMBER_PLACEHOLDER", with: String(pageNumber))
+            .replacingOccurrences(of: "LIMIT_PLACEHOLDER", with: String(limit))
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "
+", with: "\n")
+
+        let appleScriptSource = """
+        tell application "Safari"
+            do JavaScript "SCRIPT_PLACEHOLDER" in document 1
+        end tell
+        """.replacingOccurrences(of: "SCRIPT_PLACEHOLDER", with: js)
+
+        guard let script = NSAppleScript(source: appleScriptSource) else {
+            return []
+        }
+
+        var errorInfo: NSDictionary?
+        let descriptor = script.executeAndReturnError(&errorInfo)
+        guard errorInfo == nil,
+              let resultString = descriptor.stringValue,
+              let data = resultString.data(using: .utf8) else {
+            return []
+        }
+
+        do {
+            return try JSONDecoder().decode([StrategyLinkSnapshot].self, from: data)
+        } catch {
+            Logger.shared.debug("MarketWatch リンクのデコードに失敗: \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    func collectLinks(limit: Int = 400, selector: String? = nil) -> [StrategyLinkSnapshot] {
+        let jsTemplateAllLinks = #"""
         (function collectLinks() {
             try {
                 const seen = new Set();
@@ -252,8 +319,45 @@ final class SafariAccessibilityController {
         })();
         """#
 
-        var js = jsTemplate.replacingOccurrences(of: "LIMIT_PLACEHOLDER", with: String(limit))
-        js = js
+        let jsTemplateWithSelector = #"""
+        (function collectLinksWithSelector() {
+            try {
+                const selector = SELECTOR_PLACEHOLDER;
+                const seen = new Set();
+                const items = [];
+                const nodes = document.querySelectorAll(selector);
+                for (let i = 0; i < nodes.length; i += 1) {
+                    const node = nodes[i];
+                    let href = node.href || node.getAttribute('href');
+                    if (!href) { continue; }
+                    try { href = new URL(href, window.location.href).href; } catch (e) {}
+                    if (!href || seen.has(href)) { continue; }
+                    seen.add(href);
+                    const text = (node.innerText || node.textContent || "").trim();
+                    items.push({ href, text });
+                    if (items.length >= LIMIT_PLACEHOLDER) { break; }
+                }
+                return JSON.stringify(items);
+            } catch (err) {
+                return "[]";
+            }
+        })();
+        """#
+
+        let rawJS: String
+        if let selector, !selector.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let escapedSelector = selector
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+                .replacingOccurrences(of: "\n", with: " ")
+            rawJS = jsTemplateWithSelector
+                .replacingOccurrences(of: "LIMIT_PLACEHOLDER", with: String(limit))
+                .replacingOccurrences(of: "SELECTOR_PLACEHOLDER", with: "\"" + escapedSelector + "\"")
+        } else {
+            rawJS = jsTemplateAllLinks.replacingOccurrences(of: "LIMIT_PLACEHOLDER", with: String(limit))
+        }
+
+        let js = rawJS
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "\n", with: "\\n")
