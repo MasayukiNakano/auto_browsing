@@ -1,109 +1,166 @@
-# Auto Browsing Prototype
+# Auto Browsing Toolkit
 
-macOS ネイティブアプリ (SwiftUI) と Java 製ロードモア判定モジュールで構成される自動ページ送りツールの下準備です。Safari のアクセシビリティ API を経由してスクロールや "Load more" ボタン押下を行い、個別サイト固有の判定ロジックは Java モジュールで差し替えできる想定です。
+Safari をアクセシビリティ経由で制御し、ニュースサイトの「次を読み込む」や無限スクロールを自動化する macOS 向けアプリです。  
+Bloomberg / MarketWatch の最新記事リンクを収集し、Java 製の戦略モジュールと連携して Parquet 形式で保存します。
 
-## プロジェクト構成
+---
 
-- `macos-app/` — SwiftUI + AppKit による macOS アプリ本体。アクセシビリティ制御、スクロール制御、Java モジュールとの橋渡しを担当します。
-- `java-strategy/` — サイトごとのロードモア判定ロジックを提供する Java アプリ。標準入出力で Swift アプリと通信する想定のサンプル実装です。
+## 主な機能
 
-## Swift アプリ (macos-app)
+- **Bloomberg クロール**
+  - 任意フィード単体、または「全カテゴリ横断モード」で連続収集。
+  - API レスポンスの整合チェックと自動再試行（最大回数 / 待機秒数は UI から設定）。
+  - Safari から取得した記事を重複排除しつつ `.parquet` に追記。
+
+- **MarketWatch クロール**
+  - DOM 解析で見出し・発行日時を抽出し、Bloomberg と同じフォーマットで保存。
+  - 既知リンクの復元、重複検出、リトライを Bloomberg と共通挙動でサポート。
+
+- **リンク蓄積と集計**
+  - 既知リンクは `Application Support/AutoBrowsing/links-output` 以下に Parquet + `.known` キャッシュとして永続化。
+  - `scripts/aggregate_links.py` でサイト単位に重複除去した集計結果を生成（dry-run や詳細ログにも対応）。
+
+- **UI/監視**
+  - SwiftUI + AppKit による macOS アプリで、キュー状況・リトライ回数・取得履歴をリアルタイム表示。
+  - Safari の前面化、遷移待機、ランダムスリープ挿入など長時間運用を想定した制御を実装。
+
+- **戦略モジュール (Java)**
+  - `java-strategy` でロードモア操作判定、リンク書き込みを行う。
+  - Parquet 書き込み時に既存レコードを読み戻して重複を抑止。
+
+---
+
+## リポジトリ構成
+
+| パス | 説明 |
+| ---- | ---- |
+| `macos-app/` | SwiftUI + AppKit アプリ本体。アクセシビリティ制御、クロールロジック、Java ブリッジを含む。 |
+| `java-strategy/` | Java 製ロードモア戦略サーバ。Parquet 書き込みやサイト固有戦略を担当。 |
+| `scripts/` | 運用補助スクリプト。現在はリンク集計ツールを同梱。 |
+| `test/` | 実験用の小規模サンドボックス (一部サンプル)。 |
+
+---
+
+## 動作要件
+
+- macOS 13 Ventura 以降（Safari をアクセシビリティ経由で操作可能であること）。
+- Xcode 15 以降 / Swift 5.9 以降。
+- Java 17 以上（`java-strategy` 用）。
+- Python 3.9 以上 + `pandas`, `pyarrow`（リンク集計スクリプト用、任意）。
+- Safari のアクセシビリティ許可（システム設定 > プライバシーとセキュリティ > アクセシビリティ）。
+
+---
+
+## セットアップ
+
+### 1. macOS アプリのビルド / テスト
 
 ```bash
 cd macos-app
-swift build      # ビルド
-swift test       # サンプル設定の読み込みテスト
-swift run        # デバッグ起動 (Xcode でも開発可能)
+swift build          # ビルド
+swift test           # ユニットテスト
+swift run            # デバッグ起動 (Xcode プロジェクト生成も可)
 ```
 
-主なポイント:
+初回起動時はアクセシビリティ許可を求められるので、指示に従って付与してください。
+リンク保存先は既定で `~/Library/Application Support/AutoBrowsing/links-output` です。
 
-- `AppState` が UI 状態と自動化フローを管理します。
-- `SafariAccessibilityController` が AXUIElement を使って Safari を操作します。
-- `ScrollAutomationEngine` が戦略クライアントからの指示を受け取り、スクロールやボタン押下を実行します。
-- `LoadMoreStrategyClient` は将来的に Java プロセスと連携するクラスで、現状はスタブ実装になっています。
-- サイト定義は `Sources/Resources/sites.json` に格納され、アプリ起動時に読み込まれます。
-
-> ⚠️ 初回起動時には「システム設定 > プライバシーとセキュリティ > アクセシビリティ」でアプリに操作許可を付与してください。
-
-## Java モジュール (java-strategy)
+### 2. Java 戦略サーバ
 
 ```bash
 cd java-strategy
-./gradlew test   # JUnit によるサンプルテスト
-./gradlew run    # StrategyServer を起動 (標準入出力で待機)
+./gradlew test       # 戦略ロジックのテスト
+./gradlew run        # StrategyServer を起動 (標準入出力で待機)
 ```
 
-主なポイント:
+`StrategyServer` は Swift 側から JSON を受け取り、Parquet 書き込み・ロードモア指示を返します。  
+`LinkParquetWriter` が Parquet + `.known` キャッシュを生成し、重複を抑制します。
 
-- `StrategyServer` が JSON で受け渡しする簡易サーバです (プロトコルは README 内のコメント参照)。
-- `StrategyRegistry` でサイト ID やホストごとに `LoadMoreStrategy` 実装を切り替えます。Bloomberg 用戦略 (`BloombergStrategy`) も登録済みです。
-- Swift から送られたリンク情報を `LinkParquetWriter` が `links-output/<siteId>.parquet` に追記します (セッションを跨いでも保持)。
-- `scripts/aggregate_links.py` で `links-output/*.parquet` を読み込み、重複 URL を除去した結果を `links-output/aggregated/<siteId>.parquet` に書き出せます。
-- `StrategyAction` / `LoadMoreResponse` が Swift 側との共通フォーマットです。
-
-Gradle 実行環境が無い場合は `JAVA_HOME` が指す JDK17 以上を準備し、`gradle wrapper` などでセットアップしてください。
-
-## Swift と Java の接続について
-
-現状の Swift 側実装 (`LoadMoreStrategyClient`) はスタブ（ローカルロジック）ですが、次のような形で連携を組み立てられる想定です。
-
-1. `StrategyServer` を独立プロセスとして起動 (`Process` で `java -jar ...`)。
-2. 標準入力に `LoadMoreRequest` (JSON) を書き込み、標準出力から `LoadMoreResponse` を受け取る。
-3. 受け取ったレスポンスを `AutomationInstruction` に変換し、`ScrollAutomationEngine` に渡す。
-4. プロセス死活監視やタイムアウト、再起動などを `LoadMoreStrategyClient` 内で扱う。
-
-このフローに必要な土台 (レスポンス型 / AutomationInstruction / サイト設定) はすでに用意済みです。通信部分を実装すれば、サイトごとの Java 戦略に切り替えられます。
-
-サンプルリクエスト/レスポンス:
-
-```json
-{
-  "siteId": "demo-news",
-  "url": "https://news.example.com/list",
-  "visibleButtons": [
-    { "title": "Load more", "role": "AXButton" }
-  ]
-}
-```
-
-```json
-{
-  "success": true,
-  "action": "PRESS",
-  "query": { "titleContains": "Load more" }
-}
-```
-
-### リンク集計スクリプト
-
-自動化の過程で取得したリンクは `links-output/<siteId>.parquet` に追記されます。
-後続処理で重複 URL を除去したい場合は `scripts/aggregate_links.py` を実行してください。
+### 3. Python スクリプト (任意)
 
 ```bash
-python3 scripts/aggregate_links.py               # links-output/aggregated/ 以下に出力
-python3 scripts/aggregate_links.py --keep-timestamp
-python3 scripts/aggregate_links.py --base custom-dir --output result-dir
+python3 -m pip install pandas pyarrow
 ```
 
-Swift 側から実行したい場合は `Process` を使って `python3` を呼び出せます。
+---
 
-```swift
-let task = Process()
-task.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-task.arguments = ["scripts/aggregate_links.py"]
-try task.run()
-task.waitUntilExit()
+## アプリの使い方
+
+1. Swift アプリを起動し、「設定」タブでフォーカス再取得回数・スリープ間隔・自動再開回数などを調整。
+2. Bloomberg / MarketWatch タブで対象フィードや開始オフセット・ページ数を選択。
+   - Bloomberg は「全カテゴリを順番に取得」をオンにすると、Markets → Economics … の順で重複検出まで巡回します。
+3. `開始` ボタンでクロール開始。Safari が前面化し、リンクが収集されると UI に最新 10 件まで表示。
+4. 取得結果は `links-output/<siteId>*.parquet` に追記されるため、必要に応じて集計スクリプトを実行。
+
+### 自動再開と重複検出
+
+- エラーやキャプチャページ検出時は自動でリトライ（回数 / 待機秒数は設定タブ）。
+- 重複検出をオンにすると、新規リンクが見つからなかった時点でクロールを停止し、次のフィードへ遷移 / 再開に備えます。
+- Bloomberg / MarketWatch ともに `.known` キャッシュを読み込んで前回の取得状況を復元します。
+
+---
+
+## リンク集計スクリプト
+
+`scripts/aggregate_links.py` は `links-output/*.parquet` を読み込み、サイト単位に重複排除した結果を `links-output/aggregated/<site>.parquet` へ出力します。
+
+```bash
+python3 scripts/aggregate_links.py \
+    --base ~/Library/Application\ Support/AutoBrowsing/links-output \
+    --keep-timestamp \
+    --verbose
 ```
+
+主なオプション:
+
+| オプション | 説明 |
+| ---------- | ---- |
+| `--base PATH` | 入力ディレクトリ（既定: `links-output`）。 |
+| `--output PATH` | 出力先（既定: `<base>/aggregated`）。 |
+| `--keep-timestamp` | `timestampMillis` 列を保持。 |
+| `--dry-run` | 書き込みを行わず処理概要のみを表示。 |
+| `--verbose` | 詳細ログを出力。 |
+
+---
+
+## データ構造
+
+- **Parquet カラム**: `siteId`, `pageUrl`, `href`, `text`, `publishedAt`, `timestampMillis` (オプション)。
+- `.known` ファイル: `LinkParquetWriter` が既知 URL を 1 行ずつ保存するテキスト。Swift アプリはこれを読み込んで既知リンク集合を初期化します。
+- 取得ログ: `~/Library/Application Support/AutoBrowsing/status-log.txt`（必要に応じて自動アーカイブ）。
+
+---
+
+## 開発ガイド
+
+- Swift 側の主要クラス
+  - `AppState`: UI 状態 / クロールフロー / 設定管理。
+  - `SafariAccessibilityController`: アクセシビリティ API を使った Safari 操作。
+  - `ScrollAutomationEngine`: Java 戦略サーバからの指示を解釈し、スクロールやボタン押下を実行。
+  - `LoadMoreStrategyClient`: Java プロセス起動・JSON 通信・リンク蓄積。
+- Java 側
+  - `StrategyServer`: JSON リクエスト/レスポンスを処理し、リンクを Parquet に保存。
+  - `BloombergStrategy` など `LoadMoreStrategy` 実装でサイト固有の「Load more」判定を記述。
+
+テスト / フォーマット:
+
+```bash
+swift test                            # macos-app
+./gradlew test                        # java-strategy
+python3 scripts/aggregate_links.py --dry-run --verbose
+```
+
+---
 
 ## 今後の拡張アイデア
 
-- Swift 側 `LoadMoreStrategyClient` に Java プロセス起動と JSON リクエスト/レスポンス処理を実装する。
-- Java モジュールで HTML パーサ (jsoup など) や機械学習/OCR を導入し、より高度なページ解析を行う。
-- Safari 専用ではなく WebExtension 経由で DOM を直接操作するモードを追加する。
-- 設定ファイルを JSON 以外 (YAML 等) や GUI から編集できるようにする。
+- Swift と Java の常時接続を確立し、ロードモア操作を戦略サーバ主導に移行。
+- CAPTCHA 回避や認証状態維持のため、追加のヘルスチェック / プロンプト機構を導入。
+- WebExtension / AppleScript 以外の操作モードを検討（Selenium / WebKit Automation 等）。
+- 設定エクスポート・インポート、UI からの集計実行、通知連携など運用性を向上。
 
-## 開発メモ
+---
 
-- リポジトリはまだ初期化段階です。`git switch -c initial-setup` などでブランチを作成し、PR 経由で `main` にマージしてください。
-- 追加で必要なファイルやテンプレートがあれば指示を頂ければ反映します。
+## ライセンス / コントリビューション
+
+現時点では社内検証用プロトタイプとして開発中です。Issue / PR を歓迎しますが、機密情報や API トークンなどは含めないでください。必要な追加機能があれば、具体的なシナリオとともにフィードバックをお寄せください。
