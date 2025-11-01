@@ -10,6 +10,9 @@ public final class LinkSnapshot {
     @JsonProperty("text")
     private String text;
 
+    @JsonProperty("publishedAt")
+    private String publishedAt;
+
     public LinkSnapshot() {
     }
 
@@ -19,5 +22,9 @@ public final class LinkSnapshot {
 
     public String getText() {
         return text;
+    }
+
+    public String getPublishedAt() {
+        return publishedAt;
     }
 }

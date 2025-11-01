@@ -49,8 +49,18 @@ actor LoadMoreStrategyClient {
         // 標準エラーの内容はログ出しのみ
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return }
-            Logger.shared.debug("Strategy stderr: \(text)")
+            guard !data.isEmpty, let rawText = String(data: data, encoding: .utf8), !rawText.isEmpty else { return }
+            rawText
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .forEach { line in
+                    if line.hasPrefix("[strategy]") {
+                        Logger.shared.info(line)
+                    } else {
+                        Logger.shared.debug("Strategy stderr: \(line)")
+                    }
+                }
         }
 
         self.process = process
@@ -118,15 +128,29 @@ actor LoadMoreStrategyClient {
         linkSnapshots: [StrategyLinkSnapshot],
         pageURL: String?
     ) async throws -> StrategyResponsePayload? {
+        let payload = StrategyRequestPayload(siteId: site.identifier, url: pageURL, visibleButtons: buttonSnapshots, links: linkSnapshots, metadata: nil)
+        return try await sendPayload(payload)
+    }
+
+    private func sendPayload(_ payload: StrategyRequestPayload) async throws -> StrategyResponsePayload? {
         guard let stdinHandle else { return nil }
 
-        let payload = StrategyRequestPayload(siteId: site.identifier, url: pageURL, visibleButtons: buttonSnapshots, links: linkSnapshots, metadata: nil)
         let data = try encoder.encode(payload)
-
         return try await withCheckedThrowingContinuation { continuation in
             pendingContinuations.append(continuation)
             stdinHandle.write(data)
             stdinHandle.write(Data([0x0A]))
+        }
+    }
+
+    func recordLinks(siteId: String, pageURL: String?, links: [StrategyLinkSnapshot]) async {
+        guard canUseBridge, !links.isEmpty else { return }
+        do {
+            try await ensureRunning()
+            let payload = StrategyRequestPayload(siteId: siteId, url: pageURL, visibleButtons: [], links: links, metadata: ["mode": "link-capture"])
+            _ = try await sendPayload(payload)
+        } catch {
+            Logger.shared.debug("リンク保存リクエストに失敗: \(error.localizedDescription)")
         }
     }
 
@@ -283,6 +307,20 @@ actor LoadMoreStrategyClient {
                 self.command = Command(executable: executable, arguments: ["-lc", commandString])
                 self.workingDirectory = nil
                 return
+            }
+
+            if let resourceRoot = Bundle.main.resourceURL {
+                let bundledExecutable = resourceRoot
+                    .appendingPathComponent("load-more-strategy", isDirectory: true)
+                    .appendingPathComponent("bin", isDirectory: true)
+                    .appendingPathComponent("load-more-strategy", isDirectory: false)
+                    .standardized
+
+                if fileManager.isExecutableFile(atPath: bundledExecutable.path) {
+                    self.command = Command(executable: bundledExecutable, arguments: [])
+                    self.workingDirectory = bundledExecutable.deletingLastPathComponent()
+                    return
+                }
             }
 
             // デフォルトでは、gradle installDist 後の実行スクリプトを探す

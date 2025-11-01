@@ -5,6 +5,8 @@ import Foundation
 final class ScrollAutomationEngine {
     let events = PassthroughSubject<AutomationEngineEvent, Never>()
     private var shouldStop = false
+    private var pressCounters: [String: Int] = [:]
+    private var nextLongPauseThreshold: [String: Int] = [:]
 
     func runAutomation(
         siteProvider: @escaping () -> SiteProfile?,
@@ -16,6 +18,13 @@ final class ScrollAutomationEngine {
         safariController.resetStopFlag()
 
         Logger.shared.info("Automation started")
+
+        do {
+            try await safariController.prepareWorkerWindow()
+        } catch {
+            events.send(.error("Safari ウィンドウの準備に失敗しました"))
+            throw error
+        }
 
         let focusAttempts = max(activationRetryLimit, 1)
         var lastSiteIdentifier: String?
@@ -39,7 +48,8 @@ final class ScrollAutomationEngine {
             }
 
             let cursorInside = safariController.isMouseCursorInsideSafariWindow()
-            if site.identifier != "bloomberg" {
+            let suppressCursorWarning = ["bloomberg", "marketwatch"].contains(site.identifier)
+            if !suppressCursorWarning {
                 if cursorInside {
                     events.send(.scrolled("Safariウィンドウ上でスクロールしています"))
                 } else {
@@ -56,22 +66,29 @@ final class ScrollAutomationEngine {
             let buttonSnapshots = buttons.map { descriptor in
                 StrategyButtonSnapshot(title: descriptor.title, role: descriptor.role ?? "AXButton")
             }
-            let linkSnapshots = safariController.collectLinks()
+            Logger.shared.debug("Visible buttons: \(buttons.compactMap { $0.title }.joined(separator: ", "))")
+            let linkSelector = site.strategy.options["linkSelector"]
+            let linkSnapshots = safariController.collectLinks(selector: linkSelector)
             events.send(.linksUpdated(linkSnapshots))
+            Logger.shared.info("Collected \(linkSnapshots.count) links (site: \(site.identifier))")
             let pageURL = safariController.currentURL()
             events.send(.pageURL(pageURL))
             let instruction = try await strategyClient.nextInstruction(for: site, buttonSnapshots: buttonSnapshots, linkSnapshots: linkSnapshots, pageURL: pageURL)
             switch instruction {
             case .press(let selector):
-                try await performPress(selector, safariController: safariController)
+                try await performPress(selector, safariController: safariController, site: site)
+                Logger.shared.info("Instruction: press for site \(site.identifier)")
             case .scroll(let distance):
                 safariController.scroll(deltaY: distance)
                 events.send(.scrolled("スクロール: \(distance)"))
+                Logger.shared.info("Instruction: scroll \(distance) for site \(site.identifier)")
             case .wait(let seconds):
                 let interval = max(seconds, 0)
                 try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                Logger.shared.info("Instruction: wait \(seconds)s for site \(site.identifier)")
             case .noAction:
                 try await Task.sleep(nanoseconds: 500_000_000)
+                Logger.shared.info("Instruction: no action for site \(site.identifier)")
             }
         }
 
@@ -85,13 +102,34 @@ final class ScrollAutomationEngine {
 
     private func performPress(
         _ selector: AccessibilitySelector,
-        safariController: SafariAccessibilityController
+        safariController: SafariAccessibilityController,
+        site: SiteProfile
     ) async throws {
         do {
             if let title = selector.titleContains {
                 try safariController.pressElement(matching: selector)
                 events.send(.buttonPressed("ボタン押下: \(title)"))
-                try await Task.sleep(nanoseconds: 500_000_000)
+                if site.identifier == "marketwatch" {
+                    let baseDelay = Double.random(in: 4.0...8.0)
+                    try await Task.sleep(nanoseconds: UInt64(baseDelay * 1_000_000_000))
+
+                    let currentCount = (pressCounters[site.identifier] ?? 0) + 1
+                    pressCounters[site.identifier] = currentCount
+
+                    let threshold = nextLongPauseThreshold[site.identifier] ?? Int.random(in: 10...20)
+                    nextLongPauseThreshold[site.identifier] = threshold
+
+                    if currentCount >= threshold {
+                        let extraDelay = Double.random(in: 20.0...30.0)
+                        Logger.shared.info("MarketWatch long pause for \(extraDelay) seconds")
+                        try await Task.sleep(nanoseconds: UInt64(extraDelay * 1_000_000_000))
+                        pressCounters[site.identifier] = 0
+                        nextLongPauseThreshold[site.identifier] = Int.random(in: 10...20)
+                    }
+                } else {
+                    let baseDelay = Double.random(in: 0.8...1.3)
+                    try await Task.sleep(nanoseconds: UInt64(baseDelay * 1_000_000_000))
+                }
             } else {
                 events.send(.error("選択条件が未定義のためクリックできません"))
             }

@@ -28,6 +28,14 @@ final class SafariAccessibilityController {
     private let safariBundleIdentifier = "com.apple.Safari"
     private var shouldStop = false
     private let cleanupDecoder = JSONDecoder()
+    private var workerWindowID: Int?
+    private let workerWindowTitle = "AutoBrowsing Worker"
+    private lazy var workerPlaceholderURL: String = {
+        if let url = Bundle.main.url(forResource: "worker-placeholder", withExtension: "html") {
+            return url.absoluteString
+        }
+        return "about:blank"
+    }()
 
     func prepareAccessibilityIfNeeded() throws {
         if !AXIsProcessTrusted() {
@@ -43,11 +51,158 @@ final class SafariAccessibilityController {
         shouldStop = false
     }
 
+    func prepareWorkerWindow() async throws {
+        if isWorkerWindowValid() { return }
+
+        let script = """
+        tell application "Safari"
+            set targetTitle to "\(workerWindowTitle)"
+            set placeholderURL to "\(workerPlaceholderURL)"
+            set foundWindow to missing value
+            repeat with w in windows
+                try
+                    if name of w is targetTitle then
+                        set foundWindow to w
+                        exit repeat
+                    end if
+                end try
+            end repeat
+            if foundWindow is missing value then
+                make new document with properties {URL:placeholderURL}
+                set foundWindow to front window
+            else
+                try
+                    set URL of current tab of foundWindow to placeholderURL
+                end try
+            end if
+            try
+                set name of foundWindow to targetTitle
+            end try
+            set workerId to id of foundWindow
+            activate
+            return workerId
+        end tell
+        """
+
+        guard let result = runAppleScript(script) else {
+            throw AccessibilityError.safariActivationFailed
+        }
+
+        let idValue = Int(result.int32Value)
+        guard idValue > 0 else {
+            workerWindowID = nil
+            throw AccessibilityError.safariActivationFailed
+        }
+        workerWindowID = idValue
+        try await Task.sleep(nanoseconds: 200_000_000)
+        executeJavaScript("document.title='\(workerWindowTitle)'")
+    }
+
+    func ensureWorkerWindowFrontmost(maxAttempts: Int) async throws {
+        try await prepareWorkerWindow()
+        let attempts = max(maxAttempts, 1)
+        for _ in 0..<attempts {
+            if bringWorkerWindowToFrontOnce() { return }
+            try await Task.sleep(nanoseconds: 200_000_000)
+            try await prepareWorkerWindow()
+        }
+        throw AccessibilityError.safariActivationFailed
+    }
+
+    private func bringWorkerWindowToFrontOnce() -> Bool {
+        guard let id = workerWindowID else { return false }
+        let script = """
+        tell application "Safari"
+            try
+                set targetWindow to window id \(id)
+                set current tab of targetWindow to tab 1 of targetWindow
+                set index of targetWindow to 1
+                activate
+                return "OK"
+            on error errMsg
+                return "ERROR: " & errMsg
+            end try
+        end tell
+        """
+
+        guard let result = runAppleScript(script)?.stringValue else {
+            workerWindowID = nil
+            return false
+        }
+
+        if result == "OK" {
+            focusFrontmostContent()
+            return true
+        } else {
+            workerWindowID = nil
+            return false
+        }
+    }
+
+    func waitForDocumentReadyState(timeout: TimeInterval = 2.0) async -> Bool {
+        let clampedTimeout = max(timeout, 0.2)
+        let step: TimeInterval = 0.1
+        let iterations = Int(clampedTimeout / step)
+
+        for _ in 0..<max(iterations, 1) {
+            if let readyState = evaluateJavaScriptReturningString("document.readyState")?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased(),
+               readyState == "complete" {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: UInt64(step * 1_000_000_000))
+        }
+        return false
+    }
+
+    private func isWorkerWindowValid() -> Bool {
+        guard let id = workerWindowID else { return false }
+        let script = """
+        tell application "Safari"
+            repeat with w in windows
+                if id of w is \(id) then
+                    return "OK"
+                end if
+            end repeat
+            return "MISSING"
+        end tell
+        """
+
+        guard let result = runAppleScript(script)?.stringValue else {
+            workerWindowID = nil
+            return false
+        }
+
+        if result == "OK" {
+            return true
+        } else {
+            workerWindowID = nil
+            return false
+        }
+    }
+
+    private func windowSpecifier() -> String {
+        if isWorkerWindowValid() {
+            return "window id \(workerWindowID!)"
+        }
+        return "window 1"
+    }
+
+    private func tabSpecifier() -> String {
+        return "tab 1 of \(windowSpecifier())"
+    }
+
     func isSafariFrontmost() -> Bool {
         NSWorkspace.shared.frontmostApplication?.bundleIdentifier == safariBundleIdentifier
     }
 
     func ensureSafariFrontmost(maxAttempts: Int, delay: TimeInterval = 0.3) async throws {
+        if isWorkerWindowValid() {
+            try await ensureWorkerWindowFrontmost(maxAttempts: maxAttempts)
+            return
+        }
+
         let attempts = max(maxAttempts, 1)
         let waitDuration = max(delay, 0.1)
         let nanos = UInt64(waitDuration * 1_000_000_000)
@@ -74,6 +229,7 @@ final class SafariAccessibilityController {
     }
 
     private func bringSafariToFrontIfPossible() -> Bool {
+        if bringWorkerWindowToFrontOnce() { return true }
         guard isSafariFrontmost() else { return false }
         focusFrontmostContent()
         return true
@@ -162,7 +318,7 @@ final class SafariAccessibilityController {
         let scriptSource = """
         tell application "Safari"
             try
-                return URL of document 1
+                return URL of \(tabSpecifier())
             on error
                 return ""
             end try
@@ -181,18 +337,62 @@ final class SafariAccessibilityController {
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "\n", with: "\\n")
 
+        let targetDocument = tabSpecifier()
         let appleScriptSource = """
         tell application "Safari"
-            do JavaScript "SCRIPT_PLACEHOLDER" in document 1
+            try
+                do JavaScript "SCRIPT_PLACEHOLDER" in \(targetDocument)
+                return "OK"
+            on error errMsg
+                return "ERROR: " & errMsg
+            end try
+        end tell
+        """.replacingOccurrences(of: "SCRIPT_PLACEHOLDER", with: escaped)
+        if let result = runAppleScript(appleScriptSource), let message = result.stringValue, message.hasPrefix("ERROR") {
+            Logger.shared.debug("JavaScript 実行失敗: \(message)")
+        }
+    }
+
+    func evaluateJavaScriptReturningString(_ script: String) -> String? {
+        let escaped = script
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+
+        let targetDocument = tabSpecifier()
+        let appleScriptSource = """
+        tell application "Safari"
+            try
+                do JavaScript "SCRIPT_PLACEHOLDER" in \(targetDocument)
+            on error errMsg
+                return "ERROR: " & errMsg
+            end try
         end tell
         """.replacingOccurrences(of: "SCRIPT_PLACEHOLDER", with: escaped)
 
-        guard let appleScript = NSAppleScript(source: appleScriptSource) else { return }
-        var errorInfo: NSDictionary?
-        _ = appleScript.executeAndReturnError(&errorInfo)
-        if let errorInfo, let message = errorInfo[NSAppleScript.errorMessage] as? String {
-            Logger.shared.debug("JavaScript 実行失敗: \(message)")
-        }
+        guard let descriptor = runAppleScript(appleScriptSource) else { return nil }
+        guard let value = descriptor.stringValue, !value.hasPrefix("ERROR") else { return nil }
+        return value
+    }
+
+    func setDocumentURL(_ urlString: String) -> Bool {
+        let escapedURL = urlString
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+
+        let targetDocument = tabSpecifier()
+        let appleScriptSource = """
+        tell application "Safari"
+            try
+                set URL of \(targetDocument) to "\(escapedURL)"
+                return "OK"
+            on error errMsg
+                return "ERROR: " & errMsg
+            end try
+        end tell
+        """
+        guard let result = runAppleScript(appleScriptSource)?.stringValue else { return false }
+        return result.hasPrefix("OK")
     }
 
     func performCleanupScript(named key: String) -> CleanupReport? {
@@ -203,21 +403,22 @@ final class SafariAccessibilityController {
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "\n", with: "\\n")
 
+        let targetDocument = tabSpecifier()
         let appleScriptSource = """
         tell application "Safari"
-            do JavaScript "SCRIPT_PLACEHOLDER" in document 1
+            try
+                do JavaScript "SCRIPT_PLACEHOLDER" in \(targetDocument)
+            on error errMsg
+                return "ERROR: " & errMsg
+            end try
         end tell
         """.replacingOccurrences(of: "SCRIPT_PLACEHOLDER", with: escaped)
 
-        guard let appleScript = NSAppleScript(source: appleScriptSource) else { return nil }
-        var errorInfo: NSDictionary?
-        let descriptor = appleScript.executeAndReturnError(&errorInfo)
-        guard errorInfo == nil,
+        guard let descriptor = runAppleScript(appleScriptSource),
               let resultString = descriptor.stringValue,
+              !resultString.hasPrefix("ERROR"),
               let data = resultString.data(using: .utf8) else {
-            if let errorInfo, let message = errorInfo[NSAppleScript.errorMessage] as? String {
-                Logger.shared.debug("Cleanup スクリプト実行失敗: \(message)")
-            }
+            Logger.shared.debug("Cleanup スクリプト実行失敗: AppleScript error")
             return nil
         }
 
@@ -267,23 +468,22 @@ final class SafariAccessibilityController {
             .replacingOccurrences(of: "PAGE_NUMBER_PLACEHOLDER", with: String(pageNumber))
             .replacingOccurrences(of: "LIMIT_PLACEHOLDER", with: String(limit))
             .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "
-", with: "\n")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
 
         let appleScriptSource = """
         tell application "Safari"
-            do JavaScript "SCRIPT_PLACEHOLDER" in document 1
+            try
+                do JavaScript "SCRIPT_PLACEHOLDER" in \(tabSpecifier())
+            on error errMsg
+                return "ERROR: " & errMsg
+            end try
         end tell
         """.replacingOccurrences(of: "SCRIPT_PLACEHOLDER", with: js)
 
-        guard let script = NSAppleScript(source: appleScriptSource) else {
-            return []
-        }
-
-        var errorInfo: NSDictionary?
-        let descriptor = script.executeAndReturnError(&errorInfo)
-        guard errorInfo == nil,
+        guard let descriptor = runAppleScript(appleScriptSource),
               let resultString = descriptor.stringValue,
+              !resultString.hasPrefix("ERROR"),
               let data = resultString.data(using: .utf8) else {
             return []
         }
@@ -364,18 +564,17 @@ final class SafariAccessibilityController {
 
         let appleScriptSource = """
         tell application "Safari"
-            do JavaScript "SCRIPT_PLACEHOLDER" in document 1
+            try
+                do JavaScript "SCRIPT_PLACEHOLDER" in \(tabSpecifier())
+            on error errMsg
+                return "ERROR: " & errMsg
+            end try
         end tell
         """.replacingOccurrences(of: "SCRIPT_PLACEHOLDER", with: js)
 
-        guard let script = NSAppleScript(source: appleScriptSource) else {
-            return []
-        }
-
-        var errorInfo: NSDictionary?
-        let descriptor = script.executeAndReturnError(&errorInfo)
-        guard errorInfo == nil,
+        guard let descriptor = runAppleScript(appleScriptSource),
               let resultString = descriptor.stringValue,
+              !resultString.hasPrefix("ERROR"),
               let data = resultString.data(using: .utf8) else {
             return []
         }
@@ -465,6 +664,20 @@ final class SafariAccessibilityController {
         var value: CFTypeRef?
         AXUIElementCopyAttributeValue(element, attribute, &value)
         return value
+    }
+
+    private func runAppleScript(_ source: String) -> NSAppleEventDescriptor? {
+        guard let script = NSAppleScript(source: source) else {
+            Logger.shared.debug("AppleScript 作成に失敗: \(source.prefix(120))...")
+            return nil
+        }
+        var errorInfo: NSDictionary?
+        let descriptor = script.executeAndReturnError(&errorInfo)
+        if let errorInfo, let message = errorInfo[NSAppleScript.errorMessage] as? String {
+            Logger.shared.debug("AppleScript 実行失敗: \(message)")
+            return nil
+        }
+        return descriptor
     }
 
     private func enumerate(element: AXUIElement, handler: (AXUIElement, UnsafeMutablePointer<ObjCBool>) -> Void) {
