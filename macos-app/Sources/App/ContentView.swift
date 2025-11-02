@@ -798,24 +798,44 @@ struct ContentView: View {
                     }
                 }
 
-                GroupBox("本文取得対象 URL (\(appState.bloombergBodySourceURLs.count) 件)") {
+                GroupBox("本文取得対象 URL") {
                     if appState.bloombergBodySourceURLs.isEmpty {
                         Text("URL はまだ読み込まれていません")
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        VStack(alignment: .leading, spacing: 6) {
-                            ForEach(appState.bloombergBodySourceURLs.prefix(100), id: \.self) { url in
-                                Text(url)
-                                    .font(.caption)
-                                    .textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                Divider()
+                    } else if let first = appState.bloombergBodySourceURLs.first {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(first)
+                                .font(.caption)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                        HStack(spacing: 12) {
+                            Button {
+                                appState.openBloombergPreviewInSafari()
+                            } label: {
+                                if appState.bloombergPreviewLoading {
+                                    ProgressView()
+                                } else {
+                                    Label("Safari で開く", systemImage: "safari")
+                                }
                             }
-                            if appState.bloombergBodySourceURLs.count > 100 {
-                                Text("... 他 \(appState.bloombergBodySourceURLs.count - 100) 件")
+                            .buttonStyle(.borderedProminent)
+                            .disabled(appState.bloombergPreviewLoading)
+
+                            Button {
+                                appState.manuallyEnableReaderMode()
+                            } label: {
+                                Label("リーダーを適用", systemImage: "doc.richtext")
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(appState.bloombergPreviewLoading)
+
+                            if appState.bloombergBodySourceURLs.count > 1 {
+                                Text("他 \(appState.bloombergBodySourceURLs.count - 1) 件")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }

@@ -171,6 +171,7 @@ final class AppState: ObservableObject {
     @Published var bloombergSelectedParquetFile: String? = nil
     @Published var bloombergBodySourceURLs: [String] = []
     @Published var bloombergBodyLoadError: String? = nil
+    @Published var bloombergPreviewLoading: Bool = false
 
 
     private var statusLogInitialized = false
@@ -687,11 +688,92 @@ final class AppState: ObservableObject {
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
             bloombergBodySourceURLs = lines
+            Logger.shared.debug("Bloomberg URL を \(lines.count) 件読み込みました (\(knownURL.lastPathComponent))")
             if lines.isEmpty {
                 bloombergBodyLoadError = "URL が見つかりませんでした"
             }
         } catch {
             bloombergBodyLoadError = "URL の読み込みに失敗しました: \(error.localizedDescription)"
+        }
+    }
+
+    func openBloombergPreviewInSafari() {
+        guard !bloombergPreviewLoading else { return }
+        guard let urlString = bloombergBodySourceURLs.first, !urlString.isEmpty else {
+            bloombergBodyLoadError = "プレビューする URL がありません"
+            return
+        }
+
+        Logger.shared.debug("Bloomberg プレビュー URL を Safari で開きます: \(urlString)")
+        bloombergPreviewLoading = true
+        bloombergBodyLoadError = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.bloombergPreviewLoading = false }
+            let result = await self.runSafariReaderScript(with: urlString)
+            switch result {
+            case .success(let output):
+                Logger.shared.debug("Reader script output: \(output)")
+                self.updateLiveStatus("Bloomberg 記事プレビューを表示中 (リーダー表示)")
+            case .failure(let error):
+                self.bloombergBodyLoadError = error.localizedDescription
+                Logger.shared.error("Reader script failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func manuallyEnableReaderMode() {
+        Logger.shared.debug("手動リーダーモード適用を試みます")
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let urlString = self.bloombergBodySourceURLs.first, !urlString.isEmpty else {
+                self.bloombergBodyLoadError = "URL がないため手動適用できません"
+                return
+            }
+            let result = await self.runSafariReaderScript(with: urlString)
+            switch result {
+            case .success(let output):
+                Logger.shared.debug("Reader script output (manual): \(output)")
+            case .failure(let error):
+                self.bloombergBodyLoadError = error.localizedDescription
+                Logger.shared.error("Reader script failed (manual): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private enum ReaderScriptResult {
+        case success(String)
+        case failure(Error)
+    }
+
+    private func runSafariReaderScript(with url: String) async -> ReaderScriptResult {
+        guard let scriptURL = Bundle.module.url(forResource: "SafariReader", withExtension: "applescript") else {
+            return .failure(NSError(domain: "ReaderScript", code: -1, userInfo: [NSLocalizedDescriptionKey: "SafariReader.applescript が見つかりません"]))
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = [scriptURL.path, url]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let output = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if process.terminationStatus == 0 {
+                return .success(output)
+            } else {
+                let message = output.isEmpty ? "osascript が異常終了しました (コード \(process.terminationStatus))" : output
+                return .failure(NSError(domain: "ReaderScript", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: message]))
+            }
+        } catch {
+            return .failure(error)
         }
     }
 
