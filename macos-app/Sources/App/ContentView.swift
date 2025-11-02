@@ -15,6 +15,8 @@ struct ContentView: View {
                 .tabItem { Label("設定", systemImage: "slider.horizontal.3") }
             aggregationPanel
                 .tabItem { Label("データ集計", systemImage: "tray.full") }
+            bodyFetchPanel
+                .tabItem { Label("本文取得", systemImage: "doc.text") }
         }
         .frame(minWidth: 600, minHeight: 440)
         .onAppear {
@@ -25,6 +27,7 @@ struct ContentView: View {
     private func loadInitialData() {
         appState.loadSiteProfiles()
         appState.refreshSafariState()
+        appState.refreshBloombergParquetSources()
     }
 
     private func activateAppWindow() {
@@ -739,6 +742,82 @@ struct ContentView: View {
                                 .textSelection(.enabled)
                         }
                         .frame(minHeight: 160)
+                    }
+                }
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding()
+    }
+
+    private var bodyFetchPanel: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                GroupBox("Bloomberg パーケット") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if appState.bloombergParquetFiles.isEmpty {
+                            Text("Bloomberg のパーケットファイルが見つかりません")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Picker("パーケットファイル", selection: Binding(
+                                get: { appState.bloombergSelectedParquetFile ?? "" },
+                                set: { appState.bloombergSelectedParquetFile = $0.isEmpty ? nil : $0 }
+                            )) {
+                                ForEach(appState.bloombergParquetFiles, id: \.self) { path in
+                                    Text(URL(fileURLWithPath: path).lastPathComponent)
+                                        .tag(path)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 280)
+                        }
+
+                        HStack(spacing: 12) {
+                            Button {
+                                appState.refreshBloombergParquetSources()
+                            } label: {
+                                Label("リストを更新", systemImage: "arrow.clockwise")
+                            }
+                            .buttonStyle(.bordered)
+
+                            Button {
+                                appState.loadBloombergBodySources()
+                            } label: {
+                                Label("URL を読み込み", systemImage: "doc.text.magnifyingglass")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(appState.bloombergSelectedParquetFile == nil)
+                        }
+
+                        if let error = appState.bloombergBodyLoadError, !error.isEmpty {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                        }
+                    }
+                }
+
+                GroupBox("本文取得対象 URL (\(appState.bloombergBodySourceURLs.count) 件)") {
+                    if appState.bloombergBodySourceURLs.isEmpty {
+                        Text("URL はまだ読み込まれていません")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(appState.bloombergBodySourceURLs.prefix(100), id: \.self) { url in
+                                Text(url)
+                                    .font(.caption)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Divider()
+                            }
+                            if appState.bloombergBodySourceURLs.count > 100 {
+                                Text("... 他 \(appState.bloombergBodySourceURLs.count - 100) 件")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                     }
                 }
             }

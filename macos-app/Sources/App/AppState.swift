@@ -167,6 +167,10 @@ final class AppState: ObservableObject {
     @Published var bloombergSessionDuplicateCount: Int = 0
     @Published var bloombergKnownCount: Int = 0
     @Published var bloombergCrossFeedEnabled: Bool = false
+    @Published var bloombergParquetFiles: [String] = []
+    @Published var bloombergSelectedParquetFile: String? = nil
+    @Published var bloombergBodySourceURLs: [String] = []
+    @Published var bloombergBodyLoadError: String? = nil
 
 
     private var statusLogInitialized = false
@@ -212,6 +216,7 @@ final class AppState: ObservableObject {
             }
         }
         initializeStatusLogFileIfNeeded()
+        refreshBloombergParquetSources()
     }
 
     func refreshSafariState() {
@@ -623,6 +628,71 @@ final class AppState: ObservableObject {
     func openURLInSafari(_ urlString: String) {
         guard let url = URL(string: urlString) else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    func refreshBloombergParquetSources() {
+        let directories = [linksInputDirectory, linksAggregatedDirectory]
+        var found: Set<String> = []
+        let fileManager = FileManager.default
+
+        for path in directories {
+            let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let directoryURL = URL(fileURLWithPath: trimmed, isDirectory: true)
+            guard let contents = try? fileManager.contentsOfDirectory(at: directoryURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { continue }
+            for url in contents where url.pathExtension.lowercased() == "parquet" {
+                let name = url.lastPathComponent.lowercased()
+                if name.contains("bloomberg") {
+                    found.insert(url.path)
+                }
+            }
+        }
+
+        let sorted = found.sorted { lhs, rhs in
+            let l = URL(fileURLWithPath: lhs).lastPathComponent
+            let r = URL(fileURLWithPath: rhs).lastPathComponent
+            if l == r { return lhs < rhs }
+            return l < r
+        }
+
+        bloombergParquetFiles = sorted
+        if let selected = bloombergSelectedParquetFile, sorted.contains(selected) {
+            bloombergSelectedParquetFile = selected
+        } else {
+            bloombergSelectedParquetFile = sorted.first
+        }
+    }
+
+    func loadBloombergBodySources() {
+        bloombergBodyLoadError = nil
+        bloombergBodySourceURLs = []
+        guard let selected = bloombergSelectedParquetFile else {
+            bloombergBodyLoadError = "パーケットファイルが選択されていません"
+            return
+        }
+
+        let parquetURL = URL(fileURLWithPath: selected)
+        let knownURL = parquetURL.appendingPathExtension("known")
+        let fileManager = FileManager.default
+
+        guard fileManager.fileExists(atPath: knownURL.path) else {
+            bloombergBodyLoadError = "\(knownURL.lastPathComponent) が見つかりません。最新のクロールを実行してください。"
+            return
+        }
+
+        do {
+            let content = try String(contentsOf: knownURL, encoding: .utf8)
+            let lines = content
+                .split(whereSeparator: { $0.isNewline })
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            bloombergBodySourceURLs = lines
+            if lines.isEmpty {
+                bloombergBodyLoadError = "URL が見つかりませんでした"
+            }
+        } catch {
+            bloombergBodyLoadError = "URL の読み込みに失敗しました: \(error.localizedDescription)"
+        }
     }
 
     @MainActor
