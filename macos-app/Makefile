@@ -24,6 +24,7 @@ wrap: java build
 	@chmod +x $(APP_PATH)/Contents/MacOS/$(APP_NAME)
 	@cp Info.plist.template $(APP_PATH)/Contents/Info.plist
 	@cp ../scripts/aggregate_links.py $(APP_PATH)/Contents/Resources/aggregate_links.py
+	@cp Sources/Resources/AppIcon.icns $(APP_PATH)/Contents/Resources/AppIcon.icns
 	@if [ -d $(RESOURCE_BUNDLE) ]; then \
 		rm -rf $(APP_PATH)/Contents/Resources/$(APP_NAME)_$(APP_NAME).bundle; \
 		cp -R $(RESOURCE_BUNDLE) $(APP_PATH)/Contents/Resources/; \
