@@ -712,9 +712,9 @@ final class AppState: ObservableObject {
             defer { self.bloombergPreviewLoading = false }
             let result = await self.runSafariReaderScript(with: urlString)
             switch result {
-            case .success(let output):
-                Logger.shared.debug("Reader script output: \(output)")
-                self.updateLiveStatus("Bloomberg 記事プレビューを表示中 (リーダー表示)")
+            case .success(let html):
+                Logger.shared.debug("Reader script output: Reader HTML captured (\(html.count) chars)")
+                self.updateLiveStatus("Bloomberg 記事HTMLを取得しました (\(html.count) 文字)")
             case .failure(let error):
                 self.bloombergBodyLoadError = error.localizedDescription
                 Logger.shared.error("Reader script failed: \(error.localizedDescription)")
@@ -732,8 +732,8 @@ final class AppState: ObservableObject {
             }
             let result = await self.runSafariReaderScript(with: urlString)
             switch result {
-            case .success(let output):
-                Logger.shared.debug("Reader script output (manual): \(output)")
+            case .success(let html):
+                Logger.shared.debug("Reader script output (manual): Reader HTML captured (\(html.count) chars)")
             case .failure(let error):
                 self.bloombergBodyLoadError = error.localizedDescription
                 Logger.shared.error("Reader script failed (manual): \(error.localizedDescription)")
@@ -767,7 +767,12 @@ final class AppState: ObservableObject {
             let output = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
 
             if process.terminationStatus == 0 {
-                return .success(output)
+                let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    return .success(trimmed)
+                } else {
+                    return .failure(NSError(domain: "ReaderScript", code: -4, userInfo: [NSLocalizedDescriptionKey: "Reader script returned empty output"]))
+                }
             } else {
                 let message = output.isEmpty ? "osascript が異常終了しました (コード \(process.terminationStatus))" : output
                 return .failure(NSError(domain: "ReaderScript", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: message]))
