@@ -3,6 +3,10 @@ on run argv
         error "URL argument is required."
     end if
     set targetURL to item 1 of argv
+    set mode to "reader"
+    if (count of argv) >= 2 then
+        set mode to item 2 of argv
+    end if
 
     tell application "Safari"
         activate
@@ -35,10 +39,14 @@ on run argv
 
     delay 0.5
 
-    tell application "System Events"
-        keystroke "r" using {command down, shift down}
-    end tell
-
-    delay 2
-    return "Reader shortcut sent"
+    if mode is "reader" then
+        tell application "System Events"
+            keystroke "r" using {command down, shift down}
+        end tell
+        delay 1
+        return "Reader shortcut sent"
+    else
+        delay 0.5
+        return "Reader mode skipped"
+    end if
 end run

@@ -172,6 +172,11 @@ final class AppState: ObservableObject {
     @Published var bloombergBodySourceURLs: [String] = []
     @Published var bloombergBodyLoadError: String? = nil
     @Published var bloombergPreviewLoading: Bool = false
+    @Published var bloombergUseReaderMode: Bool = false {
+        didSet {
+            UserDefaults.standard.set(bloombergUseReaderMode, forKey: Self.bloombergUseReaderModeKey)
+        }
+    }
 
 
     private var statusLogInitialized = false
@@ -197,14 +202,17 @@ final class AppState: ObservableObject {
 
     private static let linksInputDirectoryKey = "linksInputDirectory"
     private static let linksAggregatedDirectoryKey = "linksAggregatedDirectory"
+    private static let bloombergUseReaderModeKey = "bloombergUseReaderMode"
 
     init() {
         let defaults = AppState.defaultLinkDirectories()
         let storedInput = UserDefaults.standard.string(forKey: Self.linksInputDirectoryKey)
         let storedOutput = UserDefaults.standard.string(forKey: Self.linksAggregatedDirectoryKey)
+        let storedReaderMode = UserDefaults.standard.object(forKey: Self.bloombergUseReaderModeKey) as? Bool
 
         self.linksInputDirectory = storedInput?.isEmpty == false ? storedInput! : defaults.input
         self.linksAggregatedDirectory = storedOutput?.isEmpty == false ? storedOutput! : defaults.output
+        self.bloombergUseReaderMode = storedReaderMode ?? false
 
         wireBindings()
         refreshAggregatorScriptLocation()
@@ -710,11 +718,19 @@ final class AppState: ObservableObject {
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.bloombergPreviewLoading = false }
-            let result = await self.runSafariReaderScript(with: urlString)
+            let result = await self.runSafariReaderScript(with: urlString, useReaderMode: self.bloombergUseReaderMode)
             switch result {
-            case .success(let html):
-                Logger.shared.debug("Reader script output: Reader HTML captured (\(html.count) chars)")
-                self.updateLiveStatus("Bloomberg 記事HTMLを取得しました (\(html.count) 文字)")
+            case .success(let message):
+                Logger.shared.debug("Reader script output: \(message)")
+                if let html = await self.captureBloombergReaderHTML() {
+                    Logger.shared.debug("Reader HTML captured (\(html.count) chars)")
+                    self.saveBloombergPreviewHTML(html)
+                    self.updateLiveStatus("Bloomberg 記事HTMLを取得しました (\(html.count) 文字)")
+                } else {
+                    let errorMessage = "Reader HTML の取得に失敗しました"
+                    self.bloombergBodyLoadError = errorMessage
+                    Logger.shared.error(errorMessage)
+                }
             case .failure(let error):
                 self.bloombergBodyLoadError = error.localizedDescription
                 Logger.shared.error("Reader script failed: \(error.localizedDescription)")
@@ -730,10 +746,10 @@ final class AppState: ObservableObject {
                 self.bloombergBodyLoadError = "URL がないため手動適用できません"
                 return
             }
-            let result = await self.runSafariReaderScript(with: urlString)
+            let result = await self.runSafariReaderScript(with: urlString, useReaderMode: true)
             switch result {
-            case .success(let html):
-                Logger.shared.debug("Reader script output (manual): Reader HTML captured (\(html.count) chars)")
+            case .success(let message):
+                Logger.shared.debug("Reader script output (manual): \(message)")
             case .failure(let error):
                 self.bloombergBodyLoadError = error.localizedDescription
                 Logger.shared.error("Reader script failed (manual): \(error.localizedDescription)")
@@ -746,14 +762,14 @@ final class AppState: ObservableObject {
         case failure(Error)
     }
 
-    private func runSafariReaderScript(with url: String) async -> ReaderScriptResult {
+    private func runSafariReaderScript(with url: String, useReaderMode: Bool) async -> ReaderScriptResult {
         guard let scriptURL = Bundle.module.url(forResource: "SafariReader", withExtension: "applescript") else {
             return .failure(NSError(domain: "ReaderScript", code: -1, userInfo: [NSLocalizedDescriptionKey: "SafariReader.applescript が見つかりません"]))
         }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = [scriptURL.path, url]
+        process.arguments = [scriptURL.path, url, useReaderMode ? "reader" : "plain"]
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -1477,6 +1493,48 @@ final class AppState: ObservableObject {
             }
         } catch {
             print("[status-log] failed to write log: \(error.localizedDescription)")
+        }
+    }
+
+    @MainActor
+    private func captureBloombergReaderHTML(timeout: TimeInterval = 15.0, pollInterval: TimeInterval = 0.25) async -> String? {
+        let deadline = Date().addingTimeInterval(timeout)
+        let javascript = "(() => { const doc = document.documentElement; if (!doc) { return ''; } return doc.outerHTML || ''; })()"
+
+        while Date() < deadline {
+            if let html = safariController.evaluateJavaScriptReturningString(javascript) {
+                let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    return html
+                }
+            }
+
+            do {
+                let interval = max(0.05, min(pollInterval, 1.0))
+                try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            } catch {
+                return nil
+            }
+        }
+
+        return nil
+    }
+
+    private func saveBloombergPreviewHTML(_ html: String) {
+        guard !html.isEmpty else { return }
+        guard let directory = statusLogDirectory() else {
+            Logger.shared.error("Bloomberg HTML 保存先の検出に失敗しました")
+            return
+        }
+
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+            let fileURL = directory.appendingPathComponent("bloomberg.html")
+            try html.write(to: fileURL, atomically: true, encoding: .utf8)
+            prependStatusMessage("Bloomberg プレビュー HTML を保存しました: \(fileURL.path)")
+        } catch {
+            Logger.shared.error("Bloomberg HTML の保存に失敗: \(error.localizedDescription)")
+            prependStatusMessage("Bloomberg HTML の保存に失敗しました: \(error.localizedDescription)")
         }
     }
 

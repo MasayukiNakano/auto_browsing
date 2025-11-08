@@ -831,6 +831,12 @@ struct ContentView: View {
                             .buttonStyle(.bordered)
                             .disabled(appState.bloombergPreviewLoading)
 
+                            Toggle("リーダーで開く", isOn: $appState.bloombergUseReaderMode)
+                                .toggleStyle(.switch)
+                                .disabled(appState.bloombergPreviewLoading)
+                                .labelsHidden()
+                                .accessibilityLabel("リーダー表示を強制")
+
                             if appState.bloombergBodySourceURLs.count > 1 {
                                 Text("他 \(appState.bloombergBodySourceURLs.count - 1) 件")
                                     .font(.caption2)
