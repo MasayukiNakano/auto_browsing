@@ -847,6 +847,55 @@ struct ContentView: View {
                     }
                 }
 
+                GroupBox("解析済みプレビュー") {
+                    if let article = appState.bloombergParsedArticle {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(article.title)
+                                .font(.title3)
+                                .fontWeight(.semibold)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                            if let dek = article.dek, !dek.isEmpty {
+                                Text(dek)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            if !article.url.isEmpty {
+                                if let url = URL(string: article.url) {
+                                    Link(article.url, destination: url)
+                                        .font(.caption)
+                                } else {
+                                    Text(article.url)
+                                        .font(.caption)
+                                }
+                            }
+
+                            if let share = article.twitterShareURL, let shareURL = URL(string: share) {
+                                Link("X で共有リンクを開く", destination: shareURL)
+                                    .font(.caption)
+                            }
+
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 12) {
+                                    ForEach(Array(article.paragraphs.enumerated()), id: \.offset) { _, paragraph in
+                                        Text(paragraph)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .font(.body)
+                                            .textSelection(.enabled)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(maxHeight: 260)
+                        }
+                    } else {
+                        Text("Safari で記事 HTML を取得するとここに解析結果が表示されます")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+
             }
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)

@@ -37,6 +37,14 @@ final class SafariAccessibilityController {
         return "about:blank"
     }()
 
+    var workerWindowName: String {
+        workerWindowTitle
+    }
+
+    var workerPlaceholderURLString: String {
+        workerPlaceholderURL
+    }
+
     func prepareAccessibilityIfNeeded() throws {
         if !AXIsProcessTrusted() {
             throw AccessibilityNotTrustedError()

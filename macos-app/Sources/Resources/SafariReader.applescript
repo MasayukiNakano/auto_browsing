@@ -7,20 +7,56 @@ on run argv
     if (count of argv) >= 2 then
         set mode to item 2 of argv
     end if
+    set targetWindowTitle to "AutoBrowsing Worker"
+    if (count of argv) >= 3 then
+        set targetWindowTitle to item 3 of argv
+    end if
+    set placeholderURL to "about:blank"
+    if (count of argv) >= 4 then
+        set placeholderURL to item 4 of argv
+    end if
 
     tell application "Safari"
         activate
         if (count of documents) = 0 then
             make new document with properties {URL:"about:blank"}
         end if
-        set workerWindow to window 1
+        set workerWindow to missing value
+        repeat with w in windows
+            try
+                if name of w is targetWindowTitle then
+                    set workerWindow to w
+                    exit repeat
+                end if
+            end try
+        end repeat
+
+        if workerWindow is missing value then
+            make new document with properties {URL:placeholderURL}
+            set workerWindow to front window
+        end if
+
+        try
+            set name of workerWindow to targetWindowTitle
+        end try
+
         tell workerWindow
             if (count of tabs) = 0 then
                 set current tab to (make new tab)
             end if
             set workerTab to current tab
+            try
+                set URL of workerTab to placeholderURL
+            end try
             set URL of workerTab to targetURL
+            try
+                set name to targetWindowTitle
+            end try
         end tell
+
+        try
+            set index of workerWindow to 1
+        end try
     end tell
 
     repeat 60 times

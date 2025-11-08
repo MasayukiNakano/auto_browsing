@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreFoundation
 import Foundation
 
 enum MarketWatchFeedOption: String, CaseIterable, Identifiable, Hashable {
@@ -84,6 +85,26 @@ struct BloombergArticle: Identifiable, Hashable {
     let publishedAt: String?
     let offset: Int
     let feed: BloombergFeedOption
+}
+
+struct BloombergParsedArticle: Codable {
+    let title: String
+    let dek: String?
+    let url: String
+    let twitterTitle: String?
+    let twitterDescription: String?
+    let paragraphs: [String]
+
+    var twitterShareURL: String? {
+        guard let encodedURL = url.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
+            return nil
+        }
+        let text = twitterTitle ?? title
+        guard let encodedText = text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
+            return nil
+        }
+        return "https://twitter.com/intent/tweet?text=\(encodedText)&url=\(encodedURL)"
+    }
 }
 
 private enum BloombergCrawlEndReason {
@@ -177,6 +198,7 @@ final class AppState: ObservableObject {
             UserDefaults.standard.set(bloombergUseReaderMode, forKey: Self.bloombergUseReaderModeKey)
         }
     }
+    @Published var bloombergParsedArticle: BloombergParsedArticle? = nil
 
 
     private var statusLogInitialized = false
@@ -724,7 +746,9 @@ final class AppState: ObservableObject {
                 Logger.shared.debug("Reader script output: \(message)")
                 if let html = await self.captureBloombergReaderHTML() {
                     Logger.shared.debug("Reader HTML captured (\(html.count) chars)")
-                    self.saveBloombergPreviewHTML(html)
+                    if let savedURL = self.saveBloombergPreviewHTML(html) {
+                        await self.parseBloombergArticle(from: savedURL)
+                    }
                     self.updateLiveStatus("Bloomberg 記事HTMLを取得しました (\(html.count) 文字)")
                 } else {
                     let errorMessage = "Reader HTML の取得に失敗しました"
@@ -769,7 +793,9 @@ final class AppState: ObservableObject {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = [scriptURL.path, url, useReaderMode ? "reader" : "plain"]
+        let windowName = safariController.workerWindowName
+        let placeholder = safariController.workerPlaceholderURLString
+        process.arguments = [scriptURL.path, url, useReaderMode ? "reader" : "plain", windowName, placeholder]
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -1520,11 +1546,59 @@ final class AppState: ObservableObject {
         return nil
     }
 
-    private func saveBloombergPreviewHTML(_ html: String) {
-        guard !html.isEmpty else { return }
+    @MainActor
+    private func parseBloombergArticle(from htmlURL: URL) async {
+        do {
+            let html = try String(contentsOf: htmlURL, encoding: .utf8)
+            let jsonString = try extractNextDataJSON(from: html)
+            guard let data = jsonString.data(using: .utf8) else {
+                throw NSError(domain: "BloombergParser", code: -10, userInfo: [NSLocalizedDescriptionKey: "JSON 文字列のエンコードに失敗しました"])
+            }
+            let decoder = JSONDecoder()
+            let payload = try decoder.decode(BloombergNextDataPayload.self, from: data)
+            let article = BloombergParsedArticle(from: payload.props.pageProps.story)
+
+            let parsedURL = htmlURL.deletingLastPathComponent().appendingPathComponent("bloomberg_parsed.json")
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
+            let encoded = try encoder.encode(article)
+            try encoded.write(to: parsedURL, options: .atomic)
+
+            bloombergParsedArticle = article
+            prependStatusMessage("Bloomberg 記事JSONを保存しました: \(parsedURL.path)")
+        } catch {
+            bloombergParsedArticle = nil
+            Logger.shared.error("Bloomberg HTML の解析に失敗: \(error.localizedDescription)")
+            prependStatusMessage("Bloomberg HTML の解析に失敗しました: \(error.localizedDescription)")
+        }
+    }
+
+    private func extractNextDataJSON(from html: String) throws -> String {
+        let marker = "<script id=\"__NEXT_DATA__\" type=\"application/json\">"
+        guard let markerRange = html.range(of: marker, options: .caseInsensitive) else {
+            throw NSError(domain: "BloombergParser", code: -11, userInfo: [NSLocalizedDescriptionKey: "__NEXT_DATA__ スクリプトが見つかりません"])
+        }
+        let searchRange = markerRange.upperBound..<html.endIndex
+        guard let endRange = html.range(of: "</script>", options: .caseInsensitive, range: searchRange) else {
+            throw NSError(domain: "BloombergParser", code: -12, userInfo: [NSLocalizedDescriptionKey: "__NEXT_DATA__ の終了タグが見つかりません"])
+        }
+        let raw = String(html[markerRange.upperBound..<endRange.lowerBound])
+        return decodeHTMLEntities(raw)
+    }
+
+    private func decodeHTMLEntities(_ value: String) -> String {
+        guard let unescaped = CFXMLCreateStringByUnescapingEntities(nil, value as CFString, nil) else {
+            return value
+        }
+        return unescaped as String
+    }
+
+    @discardableResult
+    private func saveBloombergPreviewHTML(_ html: String) -> URL? {
+        guard !html.isEmpty else { return nil }
         guard let directory = statusLogDirectory() else {
             Logger.shared.error("Bloomberg HTML 保存先の検出に失敗しました")
-            return
+            return nil
         }
 
         do {
@@ -1532,9 +1606,11 @@ final class AppState: ObservableObject {
             let fileURL = directory.appendingPathComponent("bloomberg.html")
             try html.write(to: fileURL, atomically: true, encoding: .utf8)
             prependStatusMessage("Bloomberg プレビュー HTML を保存しました: \(fileURL.path)")
+            return fileURL
         } catch {
             Logger.shared.error("Bloomberg HTML の保存に失敗: \(error.localizedDescription)")
             prependStatusMessage("Bloomberg HTML の保存に失敗しました: \(error.localizedDescription)")
+            return nil
         }
     }
 
@@ -1591,7 +1667,7 @@ final class AppState: ObservableObject {
         return url
     }
 
-    private func revealDirectory(at path: String) {
+private func revealDirectory(at path: String) {
         guard !path.isEmpty else { return }
         let url = URL(fileURLWithPath: path, isDirectory: true)
         if !FileManager.default.fileExists(atPath: url.path) {
@@ -1603,6 +1679,59 @@ final class AppState: ObservableObject {
             }
         }
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+}
+
+private struct BloombergNextDataPayload: Decodable {
+    let props: BloombergPropsPayload
+}
+
+private struct BloombergPropsPayload: Decodable {
+    let pageProps: BloombergPagePropsPayload
+}
+
+private struct BloombergPagePropsPayload: Decodable {
+    let story: BloombergStoryPayload
+}
+
+private struct BloombergStoryPayload: Decodable {
+    struct StoryBodyPayload: Decodable {
+        struct Block: Decodable {
+            struct Fragment: Decodable {
+                let value: String?
+            }
+            let type: String
+            let content: [Fragment]?
+        }
+
+        let content: [Block]?
+    }
+
+    let headline: String
+    let dek: String?
+    let url: String
+    let twitterTitle: String?
+    let twitterDescription: String?
+    let body: StoryBodyPayload?
+}
+
+private extension BloombergParsedArticle {
+    init(from story: BloombergStoryPayload) {
+        let paragraphs = story.body?.content?.compactMap { block -> String? in
+            guard block.type == "paragraph" else { return nil }
+            let text = block.content?.compactMap { $0.value }.joined()
+            let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed?.isEmpty == false ? trimmed : nil
+        } ?? []
+
+        self.init(
+            title: story.headline,
+            dek: story.dek,
+            url: story.url,
+            twitterTitle: story.twitterTitle,
+            twitterDescription: story.twitterDescription,
+            paragraphs: paragraphs
+        )
     }
 }
 
