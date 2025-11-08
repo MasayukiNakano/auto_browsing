@@ -37,6 +37,14 @@ final class SafariAccessibilityController {
         return "about:blank"
     }()
 
+    var workerWindowName: String {
+        workerWindowTitle
+    }
+
+    var workerPlaceholderURLString: String {
+        workerPlaceholderURL
+    }
+
     func prepareAccessibilityIfNeeded() throws {
         if !AXIsProcessTrusted() {
             throw AccessibilityNotTrustedError()
@@ -597,6 +605,140 @@ final class SafariAccessibilityController {
             Logger.shared.debug("リンクのデコードに失敗: \(error.localizedDescription)")
             return []
         }
+    }
+
+    func enableReaderMode() async {
+        Logger.shared.debug("Reader モード切り替えワークフロー開始")
+        guard await waitForReaderAvailability(timeout: 8.0) else {
+            Logger.shared.debug("リーダー表示が利用可能になる前にタイムアウトしました")
+            return
+        }
+        if await setReaderProperty(true) {
+            Logger.shared.debug("Reader モードが有効になりました (direct)")
+            return
+        }
+        Logger.shared.debug("リーダー直接切り替えに失敗したためショートカットを送信します")
+        sendReaderShortcut()
+        if await waitForReaderEnabled(timeout: 5.0) {
+            Logger.shared.debug("Reader モードがショートカットで有効になりました")
+        } else {
+            Logger.shared.debug("Reader モードの有効化に失敗しました")
+        }
+    }
+
+    private func waitForReaderAvailability(timeout: TimeInterval) async -> Bool {
+        let iterations = Int(timeout / 0.3)
+        for i in 0..<max(iterations, 1) {
+            if await isReaderAvailable() {
+                Logger.shared.debug("Reader モード利用可能を確認 (attempt \(i + 1))")
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+        return false
+    }
+
+    private func waitForReaderEnabled(timeout: TimeInterval) async -> Bool {
+        let iterations = Int(timeout / 0.3)
+        for _ in 0..<max(iterations, 1) {
+            if await isReaderEnabled() {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+        return false
+    }
+
+    private func isReaderAvailable() async -> Bool {
+        let script = tabTellScript(body: "return reader available")
+
+        guard let result = runAppleScript(script)?.stringValue else { return false }
+        if result == "true" || result == "false" {
+            return result == "true"
+        }
+        Logger.shared.debug("reader available の取得に失敗: \(result)")
+        return false
+    }
+
+    private func isReaderEnabled() async -> Bool {
+        let script = tabTellScript(body: "return reader")
+
+        guard let result = runAppleScript(script)?.stringValue else { return false }
+        if result == "true" || result == "false" {
+            return result == "true"
+        }
+        Logger.shared.debug("reader の取得に失敗: \(result)")
+        return false
+    }
+
+    private func setReaderProperty(_ newValue: Bool) async -> Bool {
+        let script = tabTellScript(body: "set reader to \(newValue as NSNumber)" + "\n                    return reader")
+
+        guard let result = runAppleScript(script)?.stringValue else {
+            Logger.shared.debug("reader 設定を呼び出しましたが応答がありません")
+            return false
+        }
+        if result == "true" {
+            return true
+        }
+        Logger.shared.debug("reader 設定に失敗: \(result)")
+        return false
+    }
+
+    private func sendReaderShortcut() {
+        Logger.shared.debug("Reader ショートカット (⌘⇧R) を送信します")
+        let activateScript = """
+        tell application "Safari"
+            try
+                activate
+                return "OK"
+            on error errMsg
+                return "ERROR: " & errMsg
+            end try
+        end tell
+        """
+        _ = runAppleScript(activateScript)
+
+        let script = """
+        tell application "System Events"
+            try
+                tell process "Safari"
+                    keystroke "r" using {command down, shift down}
+                    return "OK"
+                end tell
+            on error errMsg
+                return "ERROR: " & errMsg
+            end try
+        end tell
+        """
+
+        if let result = runAppleScript(script)?.stringValue,
+           result.hasPrefix("ERROR") {
+            Logger.shared.debug("Reader ショートカット送信に失敗: \(result)")
+        } else {
+            Logger.shared.debug("Reader ショートカットを送信しました")
+        }
+    }
+
+    private func tabTellScript(body: String) -> String {
+        let indented = body
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { "            " + $0 }
+            .joined(separator: "\n")
+
+        return """
+tell application "Safari"
+    try
+        tell window 1
+            tell current tab
+\(indented)
+            end tell
+        end tell
+    on error errMsg
+        return "ERROR: " & errMsg
+    end try
+end tell
+"""
     }
 
     func isMouseCursorInsideSafariWindow() -> Bool {

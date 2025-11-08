@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreFoundation
 import Foundation
 
 enum MarketWatchFeedOption: String, CaseIterable, Identifiable, Hashable {
@@ -86,6 +87,26 @@ struct BloombergArticle: Identifiable, Hashable {
     let feed: BloombergFeedOption
 }
 
+struct BloombergParsedArticle: Codable {
+    let title: String
+    let dek: String?
+    let url: String
+    let twitterTitle: String?
+    let twitterDescription: String?
+    let paragraphs: [String]
+
+    var twitterShareURL: String? {
+        guard let encodedURL = url.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
+            return nil
+        }
+        let text = twitterTitle ?? title
+        guard let encodedText = text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
+            return nil
+        }
+        return "https://twitter.com/intent/tweet?text=\(encodedText)&url=\(encodedURL)"
+    }
+}
+
 private enum BloombergCrawlEndReason {
     case completed
     case duplicateStop
@@ -167,6 +188,17 @@ final class AppState: ObservableObject {
     @Published var bloombergSessionDuplicateCount: Int = 0
     @Published var bloombergKnownCount: Int = 0
     @Published var bloombergCrossFeedEnabled: Bool = false
+    @Published var bloombergParquetFiles: [String] = []
+    @Published var bloombergSelectedParquetFile: String? = nil
+    @Published var bloombergBodySourceURLs: [String] = []
+    @Published var bloombergBodyLoadError: String? = nil
+    @Published var bloombergPreviewLoading: Bool = false
+    @Published var bloombergUseReaderMode: Bool = false {
+        didSet {
+            UserDefaults.standard.set(bloombergUseReaderMode, forKey: Self.bloombergUseReaderModeKey)
+        }
+    }
+    @Published var bloombergParsedArticle: BloombergParsedArticle? = nil
 
 
     private var statusLogInitialized = false
@@ -192,14 +224,17 @@ final class AppState: ObservableObject {
 
     private static let linksInputDirectoryKey = "linksInputDirectory"
     private static let linksAggregatedDirectoryKey = "linksAggregatedDirectory"
+    private static let bloombergUseReaderModeKey = "bloombergUseReaderMode"
 
     init() {
         let defaults = AppState.defaultLinkDirectories()
         let storedInput = UserDefaults.standard.string(forKey: Self.linksInputDirectoryKey)
         let storedOutput = UserDefaults.standard.string(forKey: Self.linksAggregatedDirectoryKey)
+        let storedReaderMode = UserDefaults.standard.object(forKey: Self.bloombergUseReaderModeKey) as? Bool
 
         self.linksInputDirectory = storedInput?.isEmpty == false ? storedInput! : defaults.input
         self.linksAggregatedDirectory = storedOutput?.isEmpty == false ? storedOutput! : defaults.output
+        self.bloombergUseReaderMode = storedReaderMode ?? false
 
         wireBindings()
         refreshAggregatorScriptLocation()
@@ -212,6 +247,7 @@ final class AppState: ObservableObject {
             }
         }
         initializeStatusLogFileIfNeeded()
+        refreshBloombergParquetSources()
     }
 
     func refreshSafariState() {
@@ -623,6 +659,169 @@ final class AppState: ObservableObject {
     func openURLInSafari(_ urlString: String) {
         guard let url = URL(string: urlString) else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    func refreshBloombergParquetSources() {
+        let directories = [linksInputDirectory, linksAggregatedDirectory]
+        var found: Set<String> = []
+        let fileManager = FileManager.default
+
+        for path in directories {
+            let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let directoryURL = URL(fileURLWithPath: trimmed, isDirectory: true)
+            guard let contents = try? fileManager.contentsOfDirectory(at: directoryURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { continue }
+            for url in contents where url.pathExtension.lowercased() == "parquet" {
+                let name = url.lastPathComponent.lowercased()
+                if name.contains("bloomberg") {
+                    found.insert(url.path)
+                }
+            }
+        }
+
+        let sorted = found.sorted { lhs, rhs in
+            let l = URL(fileURLWithPath: lhs).lastPathComponent
+            let r = URL(fileURLWithPath: rhs).lastPathComponent
+            if l == r { return lhs < rhs }
+            return l < r
+        }
+
+        bloombergParquetFiles = sorted
+        if let selected = bloombergSelectedParquetFile, sorted.contains(selected) {
+            bloombergSelectedParquetFile = selected
+        } else {
+            bloombergSelectedParquetFile = sorted.first
+        }
+    }
+
+    func loadBloombergBodySources() {
+        bloombergBodyLoadError = nil
+        bloombergBodySourceURLs = []
+        guard let selected = bloombergSelectedParquetFile else {
+            bloombergBodyLoadError = "パーケットファイルが選択されていません"
+            return
+        }
+
+        let parquetURL = URL(fileURLWithPath: selected)
+        let knownURL = parquetURL.appendingPathExtension("known")
+        let fileManager = FileManager.default
+
+        guard fileManager.fileExists(atPath: knownURL.path) else {
+            bloombergBodyLoadError = "\(knownURL.lastPathComponent) が見つかりません。最新のクロールを実行してください。"
+            return
+        }
+
+        do {
+            let content = try String(contentsOf: knownURL, encoding: .utf8)
+            let lines = content
+                .split(whereSeparator: { $0.isNewline })
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            bloombergBodySourceURLs = lines
+            Logger.shared.debug("Bloomberg URL を \(lines.count) 件読み込みました (\(knownURL.lastPathComponent))")
+            if lines.isEmpty {
+                bloombergBodyLoadError = "URL が見つかりませんでした"
+            }
+        } catch {
+            bloombergBodyLoadError = "URL の読み込みに失敗しました: \(error.localizedDescription)"
+        }
+    }
+
+    func openBloombergPreviewInSafari() {
+        guard !bloombergPreviewLoading else { return }
+        guard let urlString = bloombergBodySourceURLs.first, !urlString.isEmpty else {
+            bloombergBodyLoadError = "プレビューする URL がありません"
+            return
+        }
+
+        Logger.shared.debug("Bloomberg プレビュー URL を Safari で開きます: \(urlString)")
+        bloombergPreviewLoading = true
+        bloombergBodyLoadError = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.bloombergPreviewLoading = false }
+            let result = await self.runSafariReaderScript(with: urlString, useReaderMode: self.bloombergUseReaderMode)
+            switch result {
+            case .success(let message):
+                Logger.shared.debug("Reader script output: \(message)")
+                if let html = await self.captureBloombergReaderHTML() {
+                    Logger.shared.debug("Reader HTML captured (\(html.count) chars)")
+                    if let savedURL = self.saveBloombergPreviewHTML(html) {
+                        await self.parseBloombergArticle(from: savedURL)
+                    }
+                    self.updateLiveStatus("Bloomberg 記事HTMLを取得しました (\(html.count) 文字)")
+                } else {
+                    let errorMessage = "Reader HTML の取得に失敗しました"
+                    self.bloombergBodyLoadError = errorMessage
+                    Logger.shared.error(errorMessage)
+                }
+            case .failure(let error):
+                self.bloombergBodyLoadError = error.localizedDescription
+                Logger.shared.error("Reader script failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func manuallyEnableReaderMode() {
+        Logger.shared.debug("手動リーダーモード適用を試みます")
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let urlString = self.bloombergBodySourceURLs.first, !urlString.isEmpty else {
+                self.bloombergBodyLoadError = "URL がないため手動適用できません"
+                return
+            }
+            let result = await self.runSafariReaderScript(with: urlString, useReaderMode: true)
+            switch result {
+            case .success(let message):
+                Logger.shared.debug("Reader script output (manual): \(message)")
+            case .failure(let error):
+                self.bloombergBodyLoadError = error.localizedDescription
+                Logger.shared.error("Reader script failed (manual): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private enum ReaderScriptResult {
+        case success(String)
+        case failure(Error)
+    }
+
+    private func runSafariReaderScript(with url: String, useReaderMode: Bool) async -> ReaderScriptResult {
+        guard let scriptURL = Bundle.module.url(forResource: "SafariReader", withExtension: "applescript") else {
+            return .failure(NSError(domain: "ReaderScript", code: -1, userInfo: [NSLocalizedDescriptionKey: "SafariReader.applescript が見つかりません"]))
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        let windowName = safariController.workerWindowName
+        let placeholder = safariController.workerPlaceholderURLString
+        process.arguments = [scriptURL.path, url, useReaderMode ? "reader" : "plain", windowName, placeholder]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let output = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if process.terminationStatus == 0 {
+                let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    return .success(trimmed)
+                } else {
+                    return .failure(NSError(domain: "ReaderScript", code: -4, userInfo: [NSLocalizedDescriptionKey: "Reader script returned empty output"]))
+                }
+            } else {
+                let message = output.isEmpty ? "osascript が異常終了しました (コード \(process.terminationStatus))" : output
+                return .failure(NSError(domain: "ReaderScript", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: message]))
+            }
+        } catch {
+            return .failure(error)
+        }
     }
 
     @MainActor
@@ -1323,6 +1522,98 @@ final class AppState: ObservableObject {
         }
     }
 
+    @MainActor
+    private func captureBloombergReaderHTML(timeout: TimeInterval = 15.0, pollInterval: TimeInterval = 0.25) async -> String? {
+        let deadline = Date().addingTimeInterval(timeout)
+        let javascript = "(() => { const doc = document.documentElement; if (!doc) { return ''; } return doc.outerHTML || ''; })()"
+
+        while Date() < deadline {
+            if let html = safariController.evaluateJavaScriptReturningString(javascript) {
+                let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    return html
+                }
+            }
+
+            do {
+                let interval = max(0.05, min(pollInterval, 1.0))
+                try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            } catch {
+                return nil
+            }
+        }
+
+        return nil
+    }
+
+    @MainActor
+    private func parseBloombergArticle(from htmlURL: URL) async {
+        do {
+            let html = try String(contentsOf: htmlURL, encoding: .utf8)
+            let jsonString = try extractNextDataJSON(from: html)
+            guard let data = jsonString.data(using: .utf8) else {
+                throw NSError(domain: "BloombergParser", code: -10, userInfo: [NSLocalizedDescriptionKey: "JSON 文字列のエンコードに失敗しました"])
+            }
+            let decoder = JSONDecoder()
+            let payload = try decoder.decode(BloombergNextDataPayload.self, from: data)
+            let article = BloombergParsedArticle(from: payload.props.pageProps.story)
+
+            let parsedURL = htmlURL.deletingLastPathComponent().appendingPathComponent("bloomberg_parsed.json")
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
+            let encoded = try encoder.encode(article)
+            try encoded.write(to: parsedURL, options: .atomic)
+
+            bloombergParsedArticle = article
+            prependStatusMessage("Bloomberg 記事JSONを保存しました: \(parsedURL.path)")
+        } catch {
+            bloombergParsedArticle = nil
+            Logger.shared.error("Bloomberg HTML の解析に失敗: \(error.localizedDescription)")
+            prependStatusMessage("Bloomberg HTML の解析に失敗しました: \(error.localizedDescription)")
+        }
+    }
+
+    private func extractNextDataJSON(from html: String) throws -> String {
+        let marker = "<script id=\"__NEXT_DATA__\" type=\"application/json\">"
+        guard let markerRange = html.range(of: marker, options: .caseInsensitive) else {
+            throw NSError(domain: "BloombergParser", code: -11, userInfo: [NSLocalizedDescriptionKey: "__NEXT_DATA__ スクリプトが見つかりません"])
+        }
+        let searchRange = markerRange.upperBound..<html.endIndex
+        guard let endRange = html.range(of: "</script>", options: .caseInsensitive, range: searchRange) else {
+            throw NSError(domain: "BloombergParser", code: -12, userInfo: [NSLocalizedDescriptionKey: "__NEXT_DATA__ の終了タグが見つかりません"])
+        }
+        let raw = String(html[markerRange.upperBound..<endRange.lowerBound])
+        return decodeHTMLEntities(raw)
+    }
+
+    private func decodeHTMLEntities(_ value: String) -> String {
+        guard let unescaped = CFXMLCreateStringByUnescapingEntities(nil, value as CFString, nil) else {
+            return value
+        }
+        return unescaped as String
+    }
+
+    @discardableResult
+    private func saveBloombergPreviewHTML(_ html: String) -> URL? {
+        guard !html.isEmpty else { return nil }
+        guard let directory = statusLogDirectory() else {
+            Logger.shared.error("Bloomberg HTML 保存先の検出に失敗しました")
+            return nil
+        }
+
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+            let fileURL = directory.appendingPathComponent("bloomberg.html")
+            try html.write(to: fileURL, atomically: true, encoding: .utf8)
+            prependStatusMessage("Bloomberg プレビュー HTML を保存しました: \(fileURL.path)")
+            return fileURL
+        } catch {
+            Logger.shared.error("Bloomberg HTML の保存に失敗: \(error.localizedDescription)")
+            prependStatusMessage("Bloomberg HTML の保存に失敗しました: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
     private func statusLogDirectory() -> URL? {
         let preferred = linksAggregatedDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallback = linksInputDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1376,7 +1667,7 @@ final class AppState: ObservableObject {
         return url
     }
 
-    private func revealDirectory(at path: String) {
+private func revealDirectory(at path: String) {
         guard !path.isEmpty else { return }
         let url = URL(fileURLWithPath: path, isDirectory: true)
         if !FileManager.default.fileExists(atPath: url.path) {
@@ -1388,6 +1679,59 @@ final class AppState: ObservableObject {
             }
         }
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+}
+
+private struct BloombergNextDataPayload: Decodable {
+    let props: BloombergPropsPayload
+}
+
+private struct BloombergPropsPayload: Decodable {
+    let pageProps: BloombergPagePropsPayload
+}
+
+private struct BloombergPagePropsPayload: Decodable {
+    let story: BloombergStoryPayload
+}
+
+private struct BloombergStoryPayload: Decodable {
+    struct StoryBodyPayload: Decodable {
+        struct Block: Decodable {
+            struct Fragment: Decodable {
+                let value: String?
+            }
+            let type: String
+            let content: [Fragment]?
+        }
+
+        let content: [Block]?
+    }
+
+    let headline: String
+    let dek: String?
+    let url: String
+    let twitterTitle: String?
+    let twitterDescription: String?
+    let body: StoryBodyPayload?
+}
+
+private extension BloombergParsedArticle {
+    init(from story: BloombergStoryPayload) {
+        let paragraphs = story.body?.content?.compactMap { block -> String? in
+            guard block.type == "paragraph" else { return nil }
+            let text = block.content?.compactMap { $0.value }.joined()
+            let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed?.isEmpty == false ? trimmed : nil
+        } ?? []
+
+        self.init(
+            title: story.headline,
+            dek: story.dek,
+            url: story.url,
+            twitterTitle: story.twitterTitle,
+            twitterDescription: story.twitterDescription,
+            paragraphs: paragraphs
+        )
     }
 }
 

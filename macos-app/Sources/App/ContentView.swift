@@ -15,6 +15,8 @@ struct ContentView: View {
                 .tabItem { Label("設定", systemImage: "slider.horizontal.3") }
             aggregationPanel
                 .tabItem { Label("データ集計", systemImage: "tray.full") }
+            bodyFetchPanel
+                .tabItem { Label("本文取得", systemImage: "doc.text") }
         }
         .frame(minWidth: 600, minHeight: 440)
         .onAppear {
@@ -25,6 +27,7 @@ struct ContentView: View {
     private func loadInitialData() {
         appState.loadSiteProfiles()
         appState.refreshSafariState()
+        appState.refreshBloombergParquetSources()
     }
 
     private func activateAppWindow() {
@@ -741,6 +744,158 @@ struct ContentView: View {
                         .frame(minHeight: 160)
                     }
                 }
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding()
+    }
+
+    private var bodyFetchPanel: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                GroupBox("Bloomberg パーケット") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if appState.bloombergParquetFiles.isEmpty {
+                            Text("Bloomberg のパーケットファイルが見つかりません")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Picker("パーケットファイル", selection: Binding(
+                                get: { appState.bloombergSelectedParquetFile ?? "" },
+                                set: { appState.bloombergSelectedParquetFile = $0.isEmpty ? nil : $0 }
+                            )) {
+                                ForEach(appState.bloombergParquetFiles, id: \.self) { path in
+                                    Text(URL(fileURLWithPath: path).lastPathComponent)
+                                        .tag(path)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 280)
+                        }
+
+                        HStack(spacing: 12) {
+                            Button {
+                                appState.refreshBloombergParquetSources()
+                            } label: {
+                                Label("リストを更新", systemImage: "arrow.clockwise")
+                            }
+                            .buttonStyle(.bordered)
+
+                            Button {
+                                appState.loadBloombergBodySources()
+                            } label: {
+                                Label("URL を読み込み", systemImage: "doc.text.magnifyingglass")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(appState.bloombergSelectedParquetFile == nil)
+                        }
+
+                        if let error = appState.bloombergBodyLoadError, !error.isEmpty {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                        }
+                    }
+                }
+
+                GroupBox("本文取得対象 URL") {
+                    if appState.bloombergBodySourceURLs.isEmpty {
+                        Text("URL はまだ読み込まれていません")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else if let first = appState.bloombergBodySourceURLs.first {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(first)
+                                .font(.caption)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                        HStack(spacing: 12) {
+                            Button {
+                                appState.openBloombergPreviewInSafari()
+                            } label: {
+                                if appState.bloombergPreviewLoading {
+                                    ProgressView()
+                                } else {
+                                    Label("Safari で開く", systemImage: "safari")
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(appState.bloombergPreviewLoading)
+
+                            Button {
+                                appState.manuallyEnableReaderMode()
+                            } label: {
+                                Label("リーダーを適用", systemImage: "doc.richtext")
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(appState.bloombergPreviewLoading)
+
+                            Toggle("リーダーで開く", isOn: $appState.bloombergUseReaderMode)
+                                .toggleStyle(.switch)
+                                .disabled(appState.bloombergPreviewLoading)
+                                .labelsHidden()
+                                .accessibilityLabel("リーダー表示を強制")
+
+                            if appState.bloombergBodySourceURLs.count > 1 {
+                                Text("他 \(appState.bloombergBodySourceURLs.count - 1) 件")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                GroupBox("解析済みプレビュー") {
+                    if let article = appState.bloombergParsedArticle {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(article.title)
+                                .font(.title3)
+                                .fontWeight(.semibold)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                            if let dek = article.dek, !dek.isEmpty {
+                                Text(dek)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            if !article.url.isEmpty {
+                                if let url = URL(string: article.url) {
+                                    Link(article.url, destination: url)
+                                        .font(.caption)
+                                } else {
+                                    Text(article.url)
+                                        .font(.caption)
+                                }
+                            }
+
+                            if let share = article.twitterShareURL, let shareURL = URL(string: share) {
+                                Link("X で共有リンクを開く", destination: shareURL)
+                                    .font(.caption)
+                            }
+
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 12) {
+                                    ForEach(Array(article.paragraphs.enumerated()), id: \.offset) { _, paragraph in
+                                        Text(paragraph)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .font(.body)
+                                            .textSelection(.enabled)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(maxHeight: 260)
+                        }
+                    } else {
+                        Text("Safari で記事 HTML を取得するとここに解析結果が表示されます")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+
             }
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
