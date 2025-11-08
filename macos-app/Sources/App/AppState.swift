@@ -248,6 +248,10 @@ final class AppState: ObservableObject {
         }
         initializeStatusLogFileIfNeeded()
         refreshBloombergParquetSources()
+
+        Task { [weak self] in
+            await self?.ensureWorkerWindowAvailability(bringFront: false)
+        }
     }
 
     func refreshSafariState() {
@@ -740,6 +744,10 @@ final class AppState: ObservableObject {
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.bloombergPreviewLoading = false }
+            guard await self.ensureWorkerWindowAvailability(bringFront: true) else {
+                self.bloombergBodyLoadError = "Safari ワーカーウィンドウを準備できませんでした"
+                return
+            }
             let result = await self.runSafariReaderScript(with: urlString, useReaderMode: self.bloombergUseReaderMode)
             switch result {
             case .success(let message):
@@ -768,6 +776,10 @@ final class AppState: ObservableObject {
             guard let self else { return }
             guard let urlString = self.bloombergBodySourceURLs.first, !urlString.isEmpty else {
                 self.bloombergBodyLoadError = "URL がないため手動適用できません"
+                return
+            }
+            guard await self.ensureWorkerWindowAvailability(bringFront: true) else {
+                self.bloombergBodyLoadError = "Safari ワーカーウィンドウを準備できませんでした"
                 return
             }
             let result = await self.runSafariReaderScript(with: urlString, useReaderMode: true)
@@ -995,6 +1007,8 @@ final class AppState: ObservableObject {
         bloombergResumeOffset = currentOffset
         var endReason: BloombergCrawlEndReason = .completed
 
+        var fallbackOffsetAttempted = false
+
         for _ in 0..<maxPages {
             if Task.isCancelled || !bloombergIsCrawling {
                 endReason = .cancelled
@@ -1082,6 +1096,15 @@ final class AppState: ObservableObject {
                         }
                         continue
                     } else if autoRetryEnabled {
+                        if !fallbackOffsetAttempted {
+                            fallbackOffsetAttempted = true
+                            bloombergRetryCount = 0
+                            let nextOffset = currentOffset + 1
+                            prependStatusMessage("オフセット \(currentOffset) が応答しないため \(nextOffset) を試します")
+                            currentOffset = nextOffset
+                            bloombergResumeOffset = currentOffset
+                            continue
+                        }
                         prependStatusMessage("Bloomberg 自動再開の上限に達しました。Safari で手動対応後に再試行してください。")
                         updateLiveStatus("\(feedName) 自動再開の上限に達しました")
                     }
@@ -1611,6 +1634,22 @@ final class AppState: ObservableObject {
             Logger.shared.error("Bloomberg HTML の保存に失敗: \(error.localizedDescription)")
             prependStatusMessage("Bloomberg HTML の保存に失敗しました: \(error.localizedDescription)")
             return nil
+        }
+    }
+
+    @MainActor
+    private func ensureWorkerWindowAvailability(bringFront: Bool) async -> Bool {
+        do {
+            try safariController.prepareAccessibilityIfNeeded()
+            if bringFront {
+                try await safariController.ensureWorkerWindowFrontmost(maxAttempts: max(activationRetryLimit, 1))
+            } else {
+                try await safariController.prepareWorkerWindow()
+            }
+            return true
+        } catch {
+            Logger.shared.error("Safari ワーカーウィンドウの準備に失敗: \(error.localizedDescription)")
+            return false
         }
     }
 
