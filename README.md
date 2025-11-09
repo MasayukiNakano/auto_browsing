@@ -11,6 +11,7 @@ Bloomberg / MarketWatch の最新記事リンクを収集し、Java 製の戦略
   - 任意フィード単体、または「全カテゴリ横断モード」で連続収集。
   - API レスポンスの整合チェックと自動再試行（最大回数 / 待機秒数は UI から設定）。
   - Safari から取得した記事を重複排除しつつ `.parquet` に追記。
+  - プレビュー保存時に HTML/JSON を `url-sha1@v1-canonical` の ID で永続化し、`article_id`, `id_scheme`, `capturedAt` などメタデータを付与。保存先は設定タブから任意のディレクトリに変更可能（既定: `~/Documents/MiYabi/pipeline/staging/raw/bloomberg/{html,json}`）。
 
 - **MarketWatch クロール**
   - DOM 解析で見出し・発行日時を抽出し、Bloomberg と同じフォーマットで保存。
@@ -91,6 +92,7 @@ python3 -m pip install pandas pyarrow
    - Bloomberg は「全カテゴリを順番に取得」をオンにすると、Markets → Economics … の順で重複検出まで巡回します。
 3. `開始` ボタンでクロール開始。Safari が前面化し、リンクが収集されると UI に最新 10 件まで表示。
 4. 取得結果は `links-output/<siteId>*.parquet` に追記されるため、必要に応じて集計スクリプトを実行。
+5. 任意の URL で「Safariで開く」を押すと、専用ワーカーウィンドウで Reader を適用し、設定した保存先（既定で `~/Documents/MiYabi/pipeline/staging/raw/bloomberg/html` と `.../json`）に `<article_id>.html` / `<article_id>.json` を保存。GUI の「解析済みプレビュー」で同内容を確認できます。保存先は「設定 > 保存設定」から変更できます。
 
 ### 自動再開と重複検出
 
@@ -127,7 +129,7 @@ python3 scripts/aggregate_links.py \
 
 - **Parquet カラム**: `siteId`, `pageUrl`, `href`, `text`, `publishedAt`, `timestampMillis` (オプション)。
 - `.known` ファイル: `LinkParquetWriter` が既知 URL を 1 行ずつ保存するテキスト。Swift アプリはこれを読み込んで既知リンク集合を初期化します。
-- 取得ログ: `~/Library/Application Support/AutoBrowsing/status-log.txt`（必要に応じて自動アーカイブ）。
+- 取得ログ: `~/Library/Application Support/AutoBrowsing/links-output/logs/status-log.txt`（設定タブから保存先変更可能、必要に応じて自動アーカイブ）。
 
 ---
 

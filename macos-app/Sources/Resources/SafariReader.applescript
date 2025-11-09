@@ -15,6 +15,12 @@ on run argv
     if (count of argv) >= 4 then
         set placeholderURL to item 4 of argv
     end if
+    set targetWindowId to 0
+    if (count of argv) >= 5 then
+        try
+            set targetWindowId to (item 5 of argv) as integer
+        end try
+    end if
 
     tell application "Safari"
         activate
@@ -22,23 +28,36 @@ on run argv
             make new document with properties {URL:"about:blank"}
         end if
         set workerWindow to missing value
-        repeat with w in windows
-            try
-                if name of w is targetWindowTitle then
-                    set workerWindow to w
-                    exit repeat
-                end if
-            end try
-        end repeat
+        if targetWindowId > 0 then
+            repeat with w in windows
+                try
+                    if id of w is targetWindowId then
+                        set workerWindow to w
+                        exit repeat
+                    end if
+                end try
+            end repeat
+        end if
+
+        if workerWindow is missing value then
+            repeat with w in windows
+                try
+                    if name of w is targetWindowTitle then
+                        set workerWindow to w
+                        exit repeat
+                    end if
+                end try
+            end repeat
+        end if
 
         if workerWindow is missing value then
             make new document with properties {URL:placeholderURL}
             set workerWindow to front window
+            try
+                set name of workerWindow to targetWindowTitle
+            end try
+            set targetWindowId to id of workerWindow
         end if
-
-        try
-            set name of workerWindow to targetWindowTitle
-        end try
 
         tell workerWindow
             if (count of tabs) = 0 then
