@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import CoreFoundation
+import CryptoKit
 import Foundation
 
 enum MarketWatchFeedOption: String, CaseIterable, Identifiable, Hashable {
@@ -91,8 +92,12 @@ struct BloombergParsedArticle: Codable {
     let title: String
     let dek: String?
     let url: String
+    let articleId: String
+    let idScheme: String
     let twitterTitle: String?
     let twitterDescription: String?
+    let publishedAt: String?
+    let capturedAt: String
     let paragraphs: [String]
 
     var twitterShareURL: String? {
@@ -105,6 +110,25 @@ struct BloombergParsedArticle: Codable {
         }
         return "https://twitter.com/intent/tweet?text=\(encodedText)&url=\(encodedURL)"
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case title
+        case dek
+        case url
+        case articleId = "article_id"
+        case idScheme = "id_scheme"
+        case publishedAt
+        case capturedAt
+        case paragraphs
+        case twitterTitle
+        case twitterDescription
+    }
+}
+
+private struct BloombergSavedArticle {
+    let fileURL: URL
+    let articleId: String
+    let canonicalURL: String
 }
 
 private enum BloombergCrawlEndReason {
@@ -219,12 +243,18 @@ final class AppState: ObservableObject {
     private var bloombergNextLongPause: Int = Int.random(in: 10...20)
     private var bloombergResumeOffset: Int = 0
     private var bloombergLastRawResponse: String? = nil
+    private let iso8601Formatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
     private(set) var marketWatchRetryCount: Int = 0
     private(set) var bloombergRetryCount: Int = 0
 
     private static let linksInputDirectoryKey = "linksInputDirectory"
     private static let linksAggregatedDirectoryKey = "linksAggregatedDirectory"
     private static let bloombergUseReaderModeKey = "bloombergUseReaderMode"
+    private let bloombergIdScheme = "url-sha1@v1-canonical"
 
     init() {
         let defaults = AppState.defaultLinkDirectories()
@@ -754,8 +784,8 @@ final class AppState: ObservableObject {
                 Logger.shared.debug("Reader script output: \(message)")
                 if let html = await self.captureBloombergReaderHTML() {
                     Logger.shared.debug("Reader HTML captured (\(html.count) chars)")
-                    if let savedURL = self.saveBloombergPreviewHTML(html) {
-                        await self.parseBloombergArticle(from: savedURL)
+                    if let saved = self.saveBloombergPreviewHTML(html, sourceURL: urlString) {
+                        await self.parseBloombergArticle(from: saved)
                     }
                     self.updateLiveStatus("Bloomberg 記事HTMLを取得しました (\(html.count) 文字)")
                 } else {
@@ -1570,18 +1600,24 @@ final class AppState: ObservableObject {
     }
 
     @MainActor
-    private func parseBloombergArticle(from htmlURL: URL) async {
+    private func parseBloombergArticle(from savedArticle: BloombergSavedArticle) async {
         do {
-            let html = try String(contentsOf: htmlURL, encoding: .utf8)
+            let html = try String(contentsOf: savedArticle.fileURL, encoding: .utf8)
             let jsonString = try extractNextDataJSON(from: html)
             guard let data = jsonString.data(using: .utf8) else {
                 throw NSError(domain: "BloombergParser", code: -10, userInfo: [NSLocalizedDescriptionKey: "JSON 文字列のエンコードに失敗しました"])
             }
             let decoder = JSONDecoder()
             let payload = try decoder.decode(BloombergNextDataPayload.self, from: data)
-            let article = BloombergParsedArticle(from: payload.props.pageProps.story)
+            let capturedAt = iso8601Formatter.string(from: Date())
+            let article = BloombergParsedArticle(
+                from: payload.props.pageProps.story,
+                capturedAt: capturedAt,
+                articleId: savedArticle.articleId,
+                idScheme: bloombergIdScheme
+            )
 
-            let parsedURL = htmlURL.deletingLastPathComponent().appendingPathComponent("bloomberg_parsed.json")
+            let parsedURL = savedArticle.fileURL.deletingPathExtension().appendingPathExtension("json")
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
             let encoded = try encoder.encode(article)
@@ -1617,19 +1653,25 @@ final class AppState: ObservableObject {
     }
 
     @discardableResult
-    private func saveBloombergPreviewHTML(_ html: String) -> URL? {
+    private func saveBloombergPreviewHTML(_ html: String, sourceURL: String) -> BloombergSavedArticle? {
         guard !html.isEmpty else { return nil }
         guard let directory = statusLogDirectory() else {
             Logger.shared.error("Bloomberg HTML 保存先の検出に失敗しました")
             return nil
         }
 
+        let (articleId, canonical) = makeArticleIdentifier(for: sourceURL)
+        guard !articleId.isEmpty else {
+            Logger.shared.error("URL から記事IDを生成できませんでした")
+            return nil
+        }
+
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
-            let fileURL = directory.appendingPathComponent("bloomberg.html")
+            let fileURL = directory.appendingPathComponent("\(articleId).html")
             try html.write(to: fileURL, atomically: true, encoding: .utf8)
             prependStatusMessage("Bloomberg プレビュー HTML を保存しました: \(fileURL.path)")
-            return fileURL
+            return BloombergSavedArticle(fileURL: fileURL, articleId: articleId, canonicalURL: canonical)
         } catch {
             Logger.shared.error("Bloomberg HTML の保存に失敗: \(error.localizedDescription)")
             prependStatusMessage("Bloomberg HTML の保存に失敗しました: \(error.localizedDescription)")
@@ -1749,13 +1791,14 @@ private struct BloombergStoryPayload: Decodable {
     let headline: String
     let dek: String?
     let url: String
+    let publishedAt: String?
     let twitterTitle: String?
     let twitterDescription: String?
     let body: StoryBodyPayload?
 }
 
 private extension BloombergParsedArticle {
-    init(from story: BloombergStoryPayload) {
+    init(from story: BloombergStoryPayload, capturedAt: String, articleId: String, idScheme: String) {
         let paragraphs = story.body?.content?.compactMap { block -> String? in
             guard block.type == "paragraph" else { return nil }
             let text = block.content?.compactMap { $0.value }.joined()
@@ -1767,8 +1810,12 @@ private extension BloombergParsedArticle {
             title: story.headline,
             dek: story.dek,
             url: story.url,
+            articleId: articleId,
+            idScheme: idScheme,
             twitterTitle: story.twitterTitle,
             twitterDescription: story.twitterDescription,
+            publishedAt: story.publishedAt,
+            capturedAt: capturedAt,
             paragraphs: paragraphs
         )
     }
@@ -1778,6 +1825,109 @@ private extension String {
     func trimmed() -> String {
         trimmingCharacters(in: .whitespacesAndNewlines)
     }
+}
+
+private let unreservedCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+private let pathAllowedCharacters: CharacterSet = {
+    var set = unreservedCharacters
+    set.insert(charactersIn: "/")
+    return set
+}()
+
+private func makeArticleIdentifier(for urlString: String) -> (String, String) {
+    let canonical = canonicalURLV1(urlString)
+    let source = canonical.isEmpty ? urlString.trimmed() : canonical
+    guard !source.isEmpty else { return ("", canonical) }
+    let digest = Insecure.SHA1.hash(data: Data(source.utf8))
+    let id = digest.map { String(format: "%02x", $0) }.joined()
+    return (id, canonical)
+}
+
+private func canonicalURLV1(_ urlString: String) -> String {
+    var working = urlString.trimmed()
+    guard !working.isEmpty else { return "" }
+    if !working.contains("://") {
+        working = "https://" + working
+    }
+    guard var components = URLComponents(string: working) else { return working }
+
+    let scheme = (components.scheme ?? "https").lowercased()
+    components.scheme = scheme
+
+    var host = (components.host ?? "")
+    if let ascii = host.applyingTransform(.toLatin, reverse: false) {
+        host = ascii
+    }
+    host = host.lowercased()
+    if host.hasPrefix("www.") {
+        host.removeFirst(4)
+    }
+
+    var port = components.port
+    if (scheme == "http" && port == 80) || (scheme == "https" && port == 443) {
+        port = nil
+    }
+
+    var authority = ""
+    if let user = components.user, !user.isEmpty {
+        authority += user
+        if let password = components.password, !password.isEmpty {
+            authority += ":" + password
+        }
+        authority += "@"
+    }
+    authority += host
+    if let port {
+        authority += ":\(port)"
+    }
+
+    // Path normalization
+    var path = components.percentEncodedPath
+    if path.isEmpty { path = "/" }
+    if let decoded = path.removingPercentEncoding {
+        path = decoded
+    }
+    path = (path as NSString).standardizingPath
+    if !path.hasPrefix("/") {
+        path = "/" + path
+    }
+    if path != "/", path.hasSuffix("/") {
+        path.removeLast()
+    }
+    if let encoded = path.addingPercentEncoding(withAllowedCharacters: pathAllowedCharacters) {
+        path = encoded
+    }
+
+    // Query normalization
+    var filteredItems: [(String, String)] = []
+    if let query = components.percentEncodedQuery, !query.isEmpty {
+        let pairs = query.split(separator: "&")
+        for pair in pairs {
+            let parts = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            let name = String(parts.first ?? "")
+            let value = parts.count > 1 ? String(parts[1]) : ""
+            let rawName = name.removingPercentEncoding?.lowercased() ?? name.lowercased()
+            if rawName.hasPrefix("utm_") { continue }
+            if ["gclid", "fbclid", "igshid", "ref", "ref_src", "spm"].contains(rawName) { continue }
+            filteredItems.append((name, value))
+        }
+    }
+    filteredItems.sort { lhs, rhs in
+        if lhs.0 == rhs.0 { return lhs.1 < rhs.1 }
+        return lhs.0 < rhs.0
+    }
+    let query = filteredItems.map { name, value -> String in
+        if value.isEmpty {
+            return name
+        }
+        return name + "=" + value
+    }.joined(separator: "&")
+
+    var result = "\(scheme)://" + authority + path
+    if !query.isEmpty {
+        result += "?" + query
+    }
+    return result
 }
 
 enum AutomationStatus {

@@ -861,6 +861,12 @@ struct ContentView: View {
                                     .foregroundStyle(.secondary)
                             }
 
+                            if let published = article.publishedAt, !published.isEmpty {
+                                Text("Published: \(published)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
                             if !article.url.isEmpty {
                                 if let url = URL(string: article.url) {
                                     Link(article.url, destination: url)
@@ -870,6 +876,14 @@ struct ContentView: View {
                                         .font(.caption)
                                 }
                             }
+
+                            Text("Article ID: \(article.articleId)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+
+                            Text("Captured: \(article.capturedAt)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
 
                             if let share = article.twitterShareURL, let shareURL = URL(string: share) {
                                 Link("X で共有リンクを開く", destination: shareURL)
