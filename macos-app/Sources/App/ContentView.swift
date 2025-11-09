@@ -42,6 +42,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 16) {
                 headerSection
                 configurationSection
+                bodyFetchSettingsBox
                 sleepSettingsBox
                 retrySettingsBox
                 linkStorageSection
@@ -111,6 +112,39 @@ struct ContentView: View {
                     Text("Safari フォーカス再取得回数: \(appState.activationRetryLimit)")
                 }
                 Text("Safari が他のウィンドウに隠れた場合に再取得を試みる最大回数")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var bodyFetchSettingsBox: some View {
+        GroupBox("本文取得の挙動") {
+            VStack(alignment: .leading, spacing: 8) {
+                Stepper(value: $appState.bloombergBodyBatchSize, in: 1...10) {
+                    Text("同時に表示するタブ数: \(appState.bloombergBodyBatchSize)")
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("タブ表示遅延 (秒)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Text("平均")
+                        Spacer()
+                        TextField("平均", value: $appState.bloombergBodyDelayMean, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 80)
+                    }
+                    HStack {
+                        Text("± 変動")
+                        Spacer()
+                        TextField("変動", value: $appState.bloombergBodyDelayVariation, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 80)
+                    }
+                }
+                Text("リンク取得と同様に平均±変動の範囲でランダムな待機を挟みつつ、指定タブ数で順番に本文を取得します。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -766,7 +800,7 @@ struct ContentView: View {
                                 }
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(appState.bloombergPreviewLoading)
+                            .disabled(appState.bloombergPreviewLoading || appState.bloombergBodyBatchRunning)
 
                             Button {
                                 appState.manuallyEnableReaderMode()
@@ -774,11 +808,11 @@ struct ContentView: View {
                                 Label("リーダーを適用", systemImage: "doc.richtext")
                             }
                             .buttonStyle(.bordered)
-                            .disabled(appState.bloombergPreviewLoading)
+                            .disabled(appState.bloombergPreviewLoading || appState.bloombergBodyBatchRunning)
 
                             Toggle("リーダーで開く", isOn: $appState.bloombergUseReaderMode)
                                 .toggleStyle(.switch)
-                                .disabled(appState.bloombergPreviewLoading)
+                                .disabled(appState.bloombergPreviewLoading || appState.bloombergBodyBatchRunning)
                                 .labelsHidden()
                                 .accessibilityLabel("リーダー表示を強制")
 
@@ -790,6 +824,51 @@ struct ContentView: View {
                             }
                         }
                     }
+                }
+
+                GroupBox("バッチ取得") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 12) {
+                            Button {
+                                appState.startBloombergBodyBatchFetch()
+                            } label: {
+                                Label("全件取得開始", systemImage: "play.fill")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(appState.bloombergBodyBatchRunning || appState.bloombergBodySourceURLs.isEmpty)
+
+                            Button {
+                                appState.stopBloombergBodyBatchFetch()
+                            } label: {
+                                Label("停止", systemImage: "stop.fill")
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(!appState.bloombergBodyBatchRunning)
+                        }
+
+                        if appState.bloombergBodyBatchRunning && appState.bloombergBodyBatchTotal > 0 {
+                            ProgressView(
+                                value: Double(appState.bloombergBodyBatchProcessed),
+                                total: Double(max(appState.bloombergBodyBatchTotal, 1))
+                            )
+                            .progressViewStyle(.linear)
+                        }
+
+                        Text("進捗: \(appState.bloombergBodyBatchProcessed)/\(appState.bloombergBodyBatchTotal) ・失敗 \(appState.bloombergBodyBatchFailed)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        if let error = appState.bloombergBodyBatchLastError, !error.isEmpty {
+                            Text("最新エラー: \(error)")
+                                .font(.caption2)
+                                .foregroundColor(.red)
+                        }
+
+                        Text("同時タブ数やラグ秒数は設定タブで変更できます。")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 GroupBox("解析済みプレビュー") {

@@ -205,7 +205,7 @@ final class SafariAccessibilityController {
     }
 
     private func tabSpecifier() -> String {
-        return "tab 1 of \(windowSpecifier())"
+        return "current tab of \(windowSpecifier())"
     }
 
     func isSafariFrontmost() -> Bool {
@@ -248,6 +248,43 @@ final class SafariAccessibilityController {
         guard isSafariFrontmost() else { return false }
         focusFrontmostContent()
         return true
+    }
+
+    func setCurrentTab(index: Int) -> Bool {
+        guard index >= 1 else { return false }
+        let script = """
+        tell application "Safari"
+            try
+                tell \(windowSpecifier())
+                    if \(index) > (count of tabs) then return "ERROR: invalid index"
+                    set current tab to tab \(index)
+                    return "OK"
+                end tell
+            on error errMsg
+                return "ERROR: " & errMsg
+            end try
+        end tell
+        """
+        guard let result = runAppleScript(script)?.stringValue else { return false }
+        return result.hasPrefix("OK")
+    }
+
+    func closeTab(index: Int) {
+        guard index >= 1 else { return }
+        let script = """
+        tell application "Safari"
+            try
+                tell \(windowSpecifier())
+                    if \(index) > (count of tabs) then return "OK"
+                    close tab \(index)
+                    return "OK"
+                end tell
+            on error errMsg
+                return "ERROR: " & errMsg
+            end try
+        end tell
+        """
+        _ = runAppleScript(script)
     }
 
     func pressButton(withTitle title: String) throws {
