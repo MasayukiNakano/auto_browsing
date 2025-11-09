@@ -13,8 +13,6 @@ struct ContentView: View {
                 .tabItem { Label("その他のサイト", systemImage: "list.bullet") }
             settingsPanel
                 .tabItem { Label("設定", systemImage: "slider.horizontal.3") }
-            aggregationPanel
-                .tabItem { Label("データ集計", systemImage: "tray.full") }
             bodyFetchPanel
                 .tabItem { Label("本文取得", systemImage: "doc.text") }
         }
@@ -121,51 +119,99 @@ struct ContentView: View {
     }
 
     private var linkStorageSection: some View {
-        GroupBox("リンク保存設定") {
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("出力ディレクトリ")
-                        .font(.subheadline)
-                    Text(appState.linksInputDirectory)
-                        .font(.caption)
-                        .textSelection(.enabled)
-                    HStack {
-                        Button {
-                            appState.chooseLinksInputDirectory()
-                        } label: {
-                            Label("指定", systemImage: "folder.badge.plus")
-                        }
-                        Button {
-                            appState.revealLinksInputDirectory()
-                        } label: {
-                            Label("表示", systemImage: "folder")
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                }
+        GroupBox("保存設定") {
+            VStack(alignment: .leading, spacing: 16) {
+                storageRow(
+                    title: "リンク出力ディレクトリ",
+                    path: appState.linksInputDirectory,
+                    chooseAction: appState.chooseLinksInputDirectory,
+                    revealAction: appState.revealLinksInputDirectory
+                )
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("集計出力ディレクトリ")
-                        .font(.subheadline)
-                    Text(appState.linksAggregatedDirectory)
-                        .font(.caption)
-                        .textSelection(.enabled)
-                    HStack {
-                        Button {
-                            appState.chooseLinksAggregatedDirectory()
-                        } label: {
-                            Label("指定", systemImage: "folder.badge.plus")
-                        }
-                        Button {
-                            appState.revealLinksAggregatedDirectory()
-                        } label: {
-                            Label("表示", systemImage: "folder")
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                }
+                storageRow(
+                    title: "ログ保存先",
+                    path: appState.logOutputDirectory,
+                    chooseAction: appState.chooseLogOutputDirectory,
+                    revealAction: appState.revealLogOutputDirectory
+                )
+
+                Divider()
+
+                editableStorageRow(
+                    title: "Bloomberg 保存先 (ベース)",
+                    path: $appState.bloombergRawBaseDirectory,
+                    chooseAction: appState.selectBloombergHTMLDirectory,
+                    revealAction: appState.revealBloombergHTMLDirectory
+                )
+
+                storageRow(
+                    title: "HTML 実際の保存先",
+                    path: appState.bloombergHTMLPath,
+                    chooseAction: {},
+                    revealAction: appState.revealBloombergHTMLDirectory,
+                    showButtons: false
+                )
+
+                storageRow(
+                    title: "JSON 実際の保存先",
+                    path: appState.bloombergJSONPath,
+                    chooseAction: {},
+                    revealAction: appState.revealBloombergJSONDirectory,
+                    showButtons: false
+                )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func storageRow(
+        title: String,
+        path: String,
+        chooseAction: @escaping () -> Void,
+        revealAction: @escaping () -> Void,
+        showButtons: Bool = true
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.subheadline)
+            Text(path)
+                .font(.caption)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if showButtons {
+                HStack {
+                    Button(action: chooseAction) {
+                        Label("指定", systemImage: "folder.badge.plus")
+                    }
+                    Button(action: revealAction) {
+                        Label("表示", systemImage: "folder")
+                    }
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    private func editableStorageRow(
+        title: String,
+        path: Binding<String>,
+        chooseAction: @escaping () -> Void,
+        revealAction: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.subheadline)
+            TextField("", text: path)
+                .textFieldStyle(.roundedBorder)
+            HStack {
+                Button(action: chooseAction) {
+                    Label("指定", systemImage: "folder.badge.plus")
+                }
+                Button(action: revealAction) {
+                    Label("表示", systemImage: "folder")
+                }
+            }
+            .buttonStyle(.bordered)
         }
     }
 
@@ -642,107 +688,6 @@ struct ContentView: View {
                         }
                     }
                     .padding(.vertical, 4)
-                }
-            }
-            .padding()
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding()
-    }
-
-    private var aggregationPanel: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                GroupBox("入力ディレクトリ") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        TextField("links-output ディレクトリ", text: $appState.linksInputDirectory)
-                            .textFieldStyle(.roundedBorder)
-                        Button {
-                            appState.refreshAggregatorScriptLocation()
-                        } label: {
-                            Label("パスを再検出", systemImage: "arrow.triangle.2.circlepath")
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(appState.isAggregatingLinks)
-                    }
-                }
-
-                GroupBox("出力ディレクトリ") {
-                    TextField("集計結果の保存先", text: $appState.linksAggregatedDirectory)
-                        .textFieldStyle(.roundedBorder)
-                }
-
-                GroupBox("Python 実行環境") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        TextField("python コマンドパス", text: $appState.pythonBinaryPath)
-                            .textFieldStyle(.roundedBorder)
-                        Toggle("timestamp 列を保持する", isOn: $appState.keepTimestampOnAggregation)
-                    }
-                }
-
-                GroupBox("スクリプト位置") {
-                    if let path = appState.aggregatorScriptLocation {
-                        Text(path)
-                            .font(.caption)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        Text("aggregate_links.py が見つかっていません")
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-
-                GroupBox("操作") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Button {
-                            appState.aggregateLinks()
-                        } label: {
-                            if appState.isAggregatingLinks {
-                                HStack(spacing: 8) {
-                                    ProgressView()
-                                    Text("集計中…")
-                                }
-                            } else {
-                                Label("集計を実行", systemImage: "play.rectangle")
-                            }
-                        }
-                        .disabled(appState.isAggregatingLinks)
-
-                        if !appState.aggregationStatusMessage.isEmpty {
-                            Text(appState.aggregationStatusMessage)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                if let logFile = appState.lastAggregationLogFile {
-                    GroupBox("ログファイル") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(logFile)
-                                .font(.caption)
-                                .textSelection(.enabled)
-                            Button {
-                                appState.revealLastAggregationLogFile()
-                            } label: {
-                                Label("Finder で表示", systemImage: "doc.text.magnifyingglass")
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                    }
-                }
-
-                if !appState.aggregationLog.isEmpty {
-                    GroupBox("ログ") {
-                        ScrollView {
-                            Text(appState.aggregationLog)
-                                .font(.system(.caption, design: .monospaced))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                        }
-                        .frame(minHeight: 160)
-                    }
                 }
             }
             .padding()

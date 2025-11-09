@@ -128,7 +128,8 @@ struct BloombergParsedArticle: Codable {
 }
 
 private struct BloombergSavedArticle {
-    let fileURL: URL
+    let htmlURL: URL
+    let jsonDirectory: URL
     let articleId: String
     let canonicalURL: String
 }
@@ -174,14 +175,20 @@ final class AppState: ObservableObject {
     @Published var lastCleanupError: String? = nil
     @Published var lastCleanupSiteName: String? = nil
     @Published var linksInputDirectory: String
-    @Published var linksAggregatedDirectory: String
-    @Published var aggregationStatusMessage: String = ""
-    @Published var aggregationLog: String = ""
-    @Published var isAggregatingLinks: Bool = false
-    @Published var aggregatorScriptLocation: String? = nil
-    @Published var pythonBinaryPath: String = "/usr/bin/python3"
-    @Published var keepTimestampOnAggregation: Bool = true
-    @Published var lastAggregationLogFile: String? = nil
+    @Published var logOutputDirectory: String {
+        didSet {
+            UserDefaults.standard.set(logOutputDirectory, forKey: Self.logOutputDirectoryKey)
+            ensureDirectoryExists(at: logOutputDirectory)
+            statusLogInitialized = false
+            initializeStatusLogFileIfNeeded()
+        }
+    }
+    @Published var bloombergRawBaseDirectory: String {
+        didSet {
+            UserDefaults.standard.set(bloombergRawBaseDirectory, forKey: Self.bloombergBaseDirectoryKey)
+            ensureBloombergRawDirectories()
+        }
+    }
     @Published var marketWatchArticles: [MarketWatchArticle] = []
     @Published var marketWatchIsCrawling: Bool = false
     @Published var marketWatchStartPage: Int = 1
@@ -250,27 +257,52 @@ final class AppState: ObservableObject {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
+    private var bloombergHTMLDirectory: String {
+        URL(fileURLWithPath: bloombergRawBaseDirectory, isDirectory: true)
+            .appendingPathComponent("html", isDirectory: true)
+            .path
+    }
+    var bloombergHTMLPath: String { bloombergHTMLDirectory }
+
+    private var bloombergJSONDirectory: String {
+        URL(fileURLWithPath: bloombergRawBaseDirectory, isDirectory: true)
+            .appendingPathComponent("json", isDirectory: true)
+            .path
+    }
+    var bloombergJSONPath: String { bloombergJSONDirectory }
     private(set) var marketWatchRetryCount: Int = 0
     private(set) var bloombergRetryCount: Int = 0
 
     private static let linksInputDirectoryKey = "linksInputDirectory"
-    private static let linksAggregatedDirectoryKey = "linksAggregatedDirectory"
+    private static let legacyLinksAggregatedDirectoryKey = "linksAggregatedDirectory"
+    private static let logOutputDirectoryKey = "logOutputDirectory"
     private static let bloombergUseReaderModeKey = "bloombergUseReaderMode"
+    private static let bloombergBaseDirectoryKey = "bloombergBaseDirectory"
     private let bloombergIdScheme = "url-sha1@v1-canonical"
 
     init() {
         let defaults = AppState.defaultLinkDirectories()
         let storedInput = UserDefaults.standard.string(forKey: Self.linksInputDirectoryKey)
-        let storedOutput = UserDefaults.standard.string(forKey: Self.linksAggregatedDirectoryKey)
+        let storedLog = UserDefaults.standard.string(forKey: Self.logOutputDirectoryKey)
+        let legacyLog = UserDefaults.standard.string(forKey: Self.legacyLinksAggregatedDirectoryKey)
         let storedReaderMode = UserDefaults.standard.object(forKey: Self.bloombergUseReaderModeKey) as? Bool
+        let storedBase = UserDefaults.standard.string(forKey: Self.bloombergBaseDirectoryKey)
+        let rawDefaults = AppState.defaultBloombergRawDirectories()
 
         self.linksInputDirectory = storedInput?.isEmpty == false ? storedInput! : defaults.input
-        self.linksAggregatedDirectory = storedOutput?.isEmpty == false ? storedOutput! : defaults.output
+        if let log = storedLog, !log.isEmpty {
+            self.logOutputDirectory = log
+        } else if let legacy = legacyLog, !legacy.isEmpty {
+            self.logOutputDirectory = legacy
+        } else {
+            self.logOutputDirectory = defaults.output
+        }
+        self.bloombergRawBaseDirectory = storedBase?.isEmpty == false ? storedBase! : rawDefaults.base
         self.bloombergUseReaderMode = storedReaderMode ?? false
 
         wireBindings()
-        refreshAggregatorScriptLocation()
         updateLinkOutputEnvironment()
+        ensureBloombergRawDirectories()
         loggerObserver = NotificationCenter.default.addObserver(forName: .loggerMessage, object: nil, queue: .main) { [weak self] notification in
             guard let message = notification.userInfo?["message"] as? String else { return }
             Task { @MainActor [weak self] in
@@ -412,107 +444,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    func aggregateLinks() {
-        guard !isAggregatingLinks else { return }
-
-        let fileManager = FileManager.default
-        let basePath = linksInputDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
-        let outputPath = linksAggregatedDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard fileManager.fileExists(atPath: basePath) else {
-            aggregationStatusMessage = "入力ディレクトリが見つかりません: \(basePath)"
-            return
-        }
-
-        guard let scriptPath = locateAggregatorScript() else {
-            aggregationStatusMessage = "aggregate_links.py が見つかりませんでした"
-            aggregatorScriptLocation = nil
-            return
-        }
-        aggregatorScriptLocation = scriptPath
-
-        aggregationStatusMessage = "集計を実行中..."
-        aggregationLog = ""
-        isAggregatingLinks = true
-
-        if !fileManager.fileExists(atPath: outputPath) {
-            do {
-                try fileManager.createDirectory(atPath: outputPath, withIntermediateDirectories: true, attributes: nil)
-            } catch {
-                aggregationStatusMessage = "出力ディレクトリを作成できませんでした: \(error.localizedDescription)"
-                isAggregatingLinks = false
-                return
-            }
-        }
-
-        let pythonPath = pythonBinaryPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        let keepTimestamp = keepTimestampOnAggregation
-
-        Task.detached { [weak self] in
-            guard let self else { return }
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: pythonPath)
-            var arguments: [String] = [scriptPath, "--base", basePath, "--output", outputPath]
-            if keepTimestamp {
-                arguments.append("--keep-timestamp")
-            }
-            process.arguments = arguments
-            process.currentDirectoryURL = URL(fileURLWithPath: basePath)
-
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
-
-            do {
-                try process.run()
-            } catch {
-                await MainActor.run {
-                    self.aggregationStatusMessage = "プロセスの起動に失敗しました: \(error.localizedDescription)"
-                    self.isAggregatingLinks = false
-                }
-                return
-            }
-
-            process.waitUntilExit()
-
-            let outputData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-
-            let outputText = String(data: outputData, encoding: .utf8) ?? ""
-            let errorText = String(data: errorData, encoding: .utf8) ?? ""
-            let combinedLog = [outputText, errorText]
-                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                .joined(separator: "\n")
-                .components(separatedBy: "\n")
-                .suffix(10)
-                .joined(separator: "\n")
-
-        let logFilePath = await MainActor.run {
-            self.writeAggregationLogFileIfNeeded(log: combinedLog, outputPath: outputPath)
-        }
-
-            let status = process.terminationStatus == 0
-            await MainActor.run {
-                self.aggregationLog = combinedLog
-                if status {
-                    self.aggregationStatusMessage = "集計が完了しました"
-                } else {
-                    self.aggregationStatusMessage = "集計に失敗しました (終了コード: \(process.terminationStatus))"
-                }
-                self.isAggregatingLinks = false
-                self.lastAggregationLogFile = logFilePath
-                if let logFilePath {
-                    self.prependStatusMessage("集計ログを保存しました: \(logFilePath)")
-                }
-            }
-        }
-    }
-
-    func refreshAggregatorScriptLocation() {
-        aggregatorScriptLocation = locateAggregatorScript()
-    }
-
     func chooseLinksInputDirectory() {
         guard let url = openDirectoryPanel(initialPath: linksInputDirectory) else { return }
         let path = url.path
@@ -521,12 +452,9 @@ final class AppState: ObservableObject {
         updateLinkOutputEnvironment()
     }
 
-    func chooseLinksAggregatedDirectory() {
-        guard let url = openDirectoryPanel(initialPath: linksAggregatedDirectory) else { return }
-        let path = url.path
-        linksAggregatedDirectory = path
-        UserDefaults.standard.set(path, forKey: Self.linksAggregatedDirectoryKey)
-        updateLinkOutputEnvironment()
+    func chooseLogOutputDirectory() {
+        guard let url = openDirectoryPanel(initialPath: logOutputDirectory) else { return }
+        logOutputDirectory = url.path
     }
 
     func startMarketWatchCrawl() {
@@ -682,14 +610,8 @@ final class AppState: ObservableObject {
         revealDirectory(at: linksInputDirectory)
     }
 
-    func revealLinksAggregatedDirectory() {
-        revealDirectory(at: linksAggregatedDirectory)
-    }
-
-    func revealLastAggregationLogFile() {
-        guard let path = lastAggregationLogFile else { return }
-        let url = URL(fileURLWithPath: path)
-        NSWorkspace.shared.activateFileViewerSelecting([url])
+    func revealLogOutputDirectory() {
+        revealDirectory(at: logOutputDirectory)
     }
 
     func openURLInSafari(_ urlString: String) {
@@ -697,8 +619,21 @@ final class AppState: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
+    func selectBloombergHTMLDirectory() {
+        guard let url = openDirectoryPanel(initialPath: bloombergRawBaseDirectory) else { return }
+        bloombergRawBaseDirectory = url.path
+    }
+
+    func revealBloombergHTMLDirectory() {
+        revealDirectory(at: bloombergHTMLDirectory)
+    }
+
+    func revealBloombergJSONDirectory() {
+        revealDirectory(at: bloombergJSONDirectory)
+    }
+
     func refreshBloombergParquetSources() {
-        let directories = [linksInputDirectory, linksAggregatedDirectory]
+        let directories = [linksInputDirectory]
         var found: Set<String> = []
         let fileManager = FileManager.default
 
@@ -1455,10 +1390,10 @@ final class AppState: ObservableObject {
             let base = appSupport
                 .appendingPathComponent("AutoBrowsing", isDirectory: true)
                 .appendingPathComponent("links-output", isDirectory: true)
-            let aggregated = base.appendingPathComponent("aggregated", isDirectory: true)
+            let logs = base.appendingPathComponent("logs", isDirectory: true)
             do {
-                try fileManager.createDirectory(at: aggregated, withIntermediateDirectories: true, attributes: nil)
-                return (base.path, aggregated.path)
+                try fileManager.createDirectory(at: logs, withIntermediateDirectories: true, attributes: nil)
+                return (base.path, logs.path)
             } catch {
                 print("[status-log] failed to prepare Application Support directories: \(error.localizedDescription)")
             }
@@ -1479,8 +1414,8 @@ final class AppState: ObservableObject {
                 .appendingPathComponent("links-output")
                 .standardized
             if fileManager.fileExists(atPath: linksOutput.path) {
-                let aggregated = linksOutput.appendingPathComponent("aggregated")
-                return (linksOutput.path, aggregated.path)
+                let logs = linksOutput.appendingPathComponent("logs")
+                return (linksOutput.path, logs.path)
             }
         }
 
@@ -1492,42 +1427,22 @@ final class AppState: ObservableObject {
             .appendingPathComponent("bin")
             .appendingPathComponent("links-output")
             .standardized
-        let fallbackOutput = fallbackInput.appendingPathComponent("aggregated")
+        let fallbackOutput = fallbackInput.appendingPathComponent("logs")
         return (fallbackInput.path, fallbackOutput.path)
     }
 
-    private func locateAggregatorScript() -> String? {
-        let fileManager = FileManager.default
-        var candidates: [String] = []
-
-        if let envPath = ProcessInfo.processInfo.environment["AUTO_BROWSING_AGGREGATOR"] {
-            candidates.append(envPath)
-        }
-
-        let cwd = FileManager.default.currentDirectoryPath
-        candidates.append(contentsOf: [
-            "\(cwd)/scripts/aggregate_links.py",
-            "\(cwd)/../scripts/aggregate_links.py",
-            "\(cwd)/../../scripts/aggregate_links.py"
-        ])
-
-        if let bundleURL = Bundle.main.url(forResource: "aggregate_links", withExtension: "py", subdirectory: "scripts") {
-            candidates.append(bundleURL.path)
-        }
-
-        let bundleResourcePath = Bundle.main.bundleURL
-            .appendingPathComponent("Contents")
-            .appendingPathComponent("Resources")
-        let bundleScriptInScripts = bundleResourcePath
-            .appendingPathComponent("scripts")
-            .appendingPathComponent("aggregate_links.py")
-            .path
-        let bundleScriptRoot = bundleResourcePath
-            .appendingPathComponent("aggregate_links.py")
-            .path
-        candidates.append(contentsOf: [bundleScriptInScripts, bundleScriptRoot])
-
-        return candidates.first(where: { fileManager.fileExists(atPath: $0) })
+    private static func defaultBloombergRawDirectories() -> (base: String, html: String, json: String) {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let base = home
+            .appendingPathComponent("Documents", isDirectory: true)
+            .appendingPathComponent("MiYabi", isDirectory: true)
+            .appendingPathComponent("pipeline", isDirectory: true)
+            .appendingPathComponent("staging", isDirectory: true)
+            .appendingPathComponent("raw", isDirectory: true)
+            .appendingPathComponent("bloomberg", isDirectory: true)
+        let html = base.appendingPathComponent("html", isDirectory: true).path
+        let json = base.appendingPathComponent("json", isDirectory: true).path
+        return (base.path, html, json)
     }
 
     private func updateLinkOutputEnvironment() {
@@ -1537,21 +1452,6 @@ final class AppState: ObservableObject {
         statusLogInitialized = false
         initializeStatusLogFileIfNeeded()
         prependStatusMessage("リンク出力先: \(path)")
-    }
-
-    private func writeAggregationLogFileIfNeeded(log: String, outputPath: String) -> String? {
-        let trimmed = log.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        let directory = URL(fileURLWithPath: outputPath, isDirectory: true)
-        do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
-            let destination = directory.appendingPathComponent("aggregation-log.txt")
-            try trimmed.appending("\n").write(to: destination, atomically: true, encoding: .utf8)
-            return destination.path
-        } catch {
-            aggregationStatusMessage = "ログ書き込みに失敗しました: \(error.localizedDescription)"
-            return nil
-        }
     }
 
     private func appendStatusLog(_ entry: String) {
@@ -1605,7 +1505,7 @@ final class AppState: ObservableObject {
     @MainActor
     private func parseBloombergArticle(from savedArticle: BloombergSavedArticle) async {
         do {
-            let html = try String(contentsOf: savedArticle.fileURL, encoding: .utf8)
+            let html = try String(contentsOf: savedArticle.htmlURL, encoding: .utf8)
             let jsonString = try extractNextDataJSON(from: html)
             guard let data = jsonString.data(using: .utf8) else {
                 throw NSError(domain: "BloombergParser", code: -10, userInfo: [NSLocalizedDescriptionKey: "JSON 文字列のエンコードに失敗しました"])
@@ -1620,7 +1520,7 @@ final class AppState: ObservableObject {
                 idScheme: bloombergIdScheme
             )
 
-            let parsedURL = savedArticle.fileURL.deletingPathExtension().appendingPathExtension("json")
+            let parsedURL = savedArticle.jsonDirectory.appendingPathComponent("\(savedArticle.articleId).json")
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
             let encoded = try encoder.encode(article)
@@ -1658,10 +1558,10 @@ final class AppState: ObservableObject {
     @discardableResult
     private func saveBloombergPreviewHTML(_ html: String, sourceURL: String) -> BloombergSavedArticle? {
         guard !html.isEmpty else { return nil }
-        guard let directory = statusLogDirectory() else {
-            Logger.shared.error("Bloomberg HTML 保存先の検出に失敗しました")
-            return nil
-        }
+        let htmlDir = URL(fileURLWithPath: bloombergHTMLDirectory, isDirectory: true)
+        let jsonDir = URL(fileURLWithPath: bloombergJSONDirectory, isDirectory: true)
+        ensureDirectoryExists(at: htmlDir.path)
+        ensureDirectoryExists(at: jsonDir.path)
 
         let (articleId, canonical) = makeArticleIdentifier(for: sourceURL)
         guard !articleId.isEmpty else {
@@ -1670,11 +1570,10 @@ final class AppState: ObservableObject {
         }
 
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
-            let fileURL = directory.appendingPathComponent("\(articleId).html")
+            let fileURL = htmlDir.appendingPathComponent("\(articleId).html")
             try html.write(to: fileURL, atomically: true, encoding: .utf8)
             prependStatusMessage("Bloomberg プレビュー HTML を保存しました: \(fileURL.path)")
-            return BloombergSavedArticle(fileURL: fileURL, articleId: articleId, canonicalURL: canonical)
+            return BloombergSavedArticle(htmlURL: fileURL, jsonDirectory: jsonDir, articleId: articleId, canonicalURL: canonical)
         } catch {
             Logger.shared.error("Bloomberg HTML の保存に失敗: \(error.localizedDescription)")
             prependStatusMessage("Bloomberg HTML の保存に失敗しました: \(error.localizedDescription)")
@@ -1699,7 +1598,7 @@ final class AppState: ObservableObject {
     }
 
     private func statusLogDirectory() -> URL? {
-        let preferred = linksAggregatedDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        let preferred = logOutputDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallback = linksInputDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
         let path = preferred.isEmpty ? fallback : preferred
         guard !path.isEmpty else { return nil }
@@ -1751,18 +1650,36 @@ final class AppState: ObservableObject {
         return url
     }
 
-private func revealDirectory(at path: String) {
+    private func revealDirectory(at path: String) {
         guard !path.isEmpty else { return }
         let url = URL(fileURLWithPath: path, isDirectory: true)
         if !FileManager.default.fileExists(atPath: url.path) {
             do {
                 try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
             } catch {
-                aggregationStatusMessage = "フォルダを作成できませんでした: \(error.localizedDescription)"
+                Logger.shared.error("フォルダを作成できませんでした: \(error.localizedDescription)")
+                prependStatusMessage("フォルダを作成できませんでした: \(error.localizedDescription)")
                 return
             }
         }
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    private func ensureDirectoryExists(at path: String) {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let url = URL(fileURLWithPath: trimmed, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        } catch {
+            Logger.shared.error("ディレクトリ作成に失敗: \(error.localizedDescription)")
+        }
+    }
+
+    private func ensureBloombergRawDirectories() {
+        ensureDirectoryExists(at: bloombergRawBaseDirectory)
+        ensureDirectoryExists(at: bloombergHTMLDirectory)
+        ensureDirectoryExists(at: bloombergJSONDirectory)
     }
 }
 
