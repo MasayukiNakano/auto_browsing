@@ -94,6 +94,7 @@ struct BloombergParsedArticle: Codable {
     let url: String
     let articleId: String
     let idScheme: String
+    let source: String
     let twitterTitle: String?
     let twitterDescription: String?
     let publishedAt: String?
@@ -117,6 +118,7 @@ struct BloombergParsedArticle: Codable {
         case url
         case articleId = "article_id"
         case idScheme = "id_scheme"
+        case source
         case publishedAt
         case capturedAt
         case paragraphs
@@ -837,7 +839,8 @@ final class AppState: ObservableObject {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         let windowName = safariController.workerWindowName
         let placeholder = safariController.workerPlaceholderURLString
-        process.arguments = [scriptURL.path, url, useReaderMode ? "reader" : "plain", windowName, placeholder]
+        let windowId = safariController.workerWindowIdentifierArgument
+        process.arguments = [scriptURL.path, url, useReaderMode ? "reader" : "plain", windowName, placeholder, windowId]
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -1812,6 +1815,7 @@ private extension BloombergParsedArticle {
             url: story.url,
             articleId: articleId,
             idScheme: idScheme,
+            source: "bloomberg",
             twitterTitle: story.twitterTitle,
             twitterDescription: story.twitterDescription,
             publishedAt: story.publishedAt,

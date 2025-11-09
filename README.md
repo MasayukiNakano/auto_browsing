@@ -11,6 +11,7 @@ Bloomberg / MarketWatch の最新記事リンクを収集し、Java 製の戦略
   - 任意フィード単体、または「全カテゴリ横断モード」で連続収集。
   - API レスポンスの整合チェックと自動再試行（最大回数 / 待機秒数は UI から設定）。
   - Safari から取得した記事を重複排除しつつ `.parquet` に追記。
+  - プレビュー保存時に HTML/JSON を `url-sha1@v1-canonical` の ID で永続化し、`article_id`, `id_scheme`, `capturedAt` などメタデータを付与。
 
 - **MarketWatch クロール**
   - DOM 解析で見出し・発行日時を抽出し、Bloomberg と同じフォーマットで保存。
@@ -91,6 +92,8 @@ python3 -m pip install pandas pyarrow
    - Bloomberg は「全カテゴリを順番に取得」をオンにすると、Markets → Economics … の順で重複検出まで巡回します。
 3. `開始` ボタンでクロール開始。Safari が前面化し、リンクが収集されると UI に最新 10 件まで表示。
 4. 取得結果は `links-output/<siteId>*.parquet` に追記されるため、必要に応じて集計スクリプトを実行。
+5. 任意の URL で「Safariで開く」を押すと、専用ワーカーウィンドウで Reader を適用し、`
+   links-output/` に `<article_id>.html` と `<article_id>.json`（タイトル・本文・`article_id`・`id_scheme`・`capturedAt` など）を保存。GUI の「解析済みプレビュー」で同内容を確認できます。
 
 ### 自動再開と重複検出
 

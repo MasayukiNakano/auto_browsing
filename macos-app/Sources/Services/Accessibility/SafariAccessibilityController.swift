@@ -45,6 +45,13 @@ final class SafariAccessibilityController {
         workerPlaceholderURL
     }
 
+    var workerWindowIdentifierArgument: String {
+        if let id = workerWindowID {
+            return String(id)
+        }
+        return ""
+    }
+
     func prepareAccessibilityIfNeeded() throws {
         if !AXIsProcessTrusted() {
             throw AccessibilityNotTrustedError()

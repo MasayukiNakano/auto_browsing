@@ -129,6 +129,7 @@ def extract_story(blob: dict) -> dict:
         "url": raw_url,
         "article_id": article_id,
         "id_scheme": ID_SCHEME,
+        "source": "bloomberg",
         "publishedAt": story.get("publishedAt"),
         "capturedAt": captured,
         "paragraphs": paragraphs,
