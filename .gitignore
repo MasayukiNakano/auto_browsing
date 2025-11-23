@@ -16,6 +16,7 @@ java-strategy/build/
 
 # Link outputs
 links-output/
+data/
 
 # Editor swap files
 *.swp
