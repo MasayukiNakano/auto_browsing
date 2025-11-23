@@ -159,6 +159,7 @@ private struct BloombergArchiveResponse: Decodable {
 private struct BloombergBodyFetchSlot {
     var tabIndex: Int
     var currentURL: String?
+    var readyForCapture: Bool
 }
 
 @MainActor
@@ -188,9 +189,15 @@ final class AppState: ObservableObject {
             initializeStatusLogFileIfNeeded()
         }
     }
-    @Published var bloombergRawBaseDirectory: String {
+    @Published var bloombergHTMLDirectory: String {
         didSet {
-            UserDefaults.standard.set(bloombergRawBaseDirectory, forKey: Self.bloombergBaseDirectoryKey)
+            UserDefaults.standard.set(bloombergHTMLDirectory, forKey: Self.bloombergHTMLDirectoryKey)
+            ensureBloombergRawDirectories()
+        }
+    }
+    @Published var bloombergJSONDirectory: String {
+        didSet {
+            UserDefaults.standard.set(bloombergJSONDirectory, forKey: Self.bloombergJSONDirectoryKey)
             ensureBloombergRawDirectories()
         }
     }
@@ -267,6 +274,44 @@ final class AppState: ObservableObject {
             UserDefaults.standard.set(clamped, forKey: Self.bloombergBodyDelayVariationKey)
         }
     }
+    @Published var bloombergBodyLongSleepEnabled: Bool = false {
+        didSet {
+            UserDefaults.standard.set(bloombergBodyLongSleepEnabled, forKey: Self.bloombergBodyLongSleepEnabledKey)
+            resetBloombergBodyLongSleepSchedule()
+        }
+    }
+    @Published var bloombergBodyLongSleepEvery: Int {
+        didSet {
+            let clamped = max(1, min(500, bloombergBodyLongSleepEvery))
+            if bloombergBodyLongSleepEvery != clamped {
+                bloombergBodyLongSleepEvery = clamped
+                return
+            }
+            UserDefaults.standard.set(clamped, forKey: Self.bloombergBodyLongSleepEveryKey)
+            resetBloombergBodyLongSleepSchedule()
+        }
+    }
+    @Published var bloombergBodyLongSleepJitter: Int {
+        didSet {
+            let clamped = max(0, min(200, bloombergBodyLongSleepJitter))
+            if bloombergBodyLongSleepJitter != clamped {
+                bloombergBodyLongSleepJitter = clamped
+                return
+            }
+            UserDefaults.standard.set(clamped, forKey: Self.bloombergBodyLongSleepJitterKey)
+            resetBloombergBodyLongSleepSchedule()
+        }
+    }
+    @Published var bloombergBodyLongSleepMinutes: Double {
+        didSet {
+            let clamped = max(1.0, min(120.0, bloombergBodyLongSleepMinutes))
+            if abs(bloombergBodyLongSleepMinutes - clamped) > .ulpOfOne {
+                bloombergBodyLongSleepMinutes = clamped
+                return
+            }
+            UserDefaults.standard.set(clamped, forKey: Self.bloombergBodyLongSleepMinutesKey)
+        }
+    }
     @Published var bloombergBodyBatchRunning: Bool = false
     @Published var bloombergBodyBatchProcessed: Int = 0
     @Published var bloombergBodyBatchTotal: Int = 0
@@ -292,26 +337,16 @@ final class AppState: ObservableObject {
     private var bloombergSeenArticleIds: Set<String> = []
     private var bloombergFetchCount: Int = 0
     private var bloombergNextLongPause: Int = Int.random(in: 10...20)
+    private var bloombergBodyLongSleepCounter: Int = 0
+    private var bloombergBodyNextLongSleep: Int = 0
     private var bloombergResumeOffset: Int = 0
     private var bloombergLastRawResponse: String? = nil
+    private let robotHTMLSizeThresholdBytes: Int = 50 * 1024
     private let iso8601Formatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
-    private var bloombergHTMLDirectory: String {
-        URL(fileURLWithPath: bloombergRawBaseDirectory, isDirectory: true)
-            .appendingPathComponent("html", isDirectory: true)
-            .path
-    }
-    var bloombergHTMLPath: String { bloombergHTMLDirectory }
-
-    private var bloombergJSONDirectory: String {
-        URL(fileURLWithPath: bloombergRawBaseDirectory, isDirectory: true)
-            .appendingPathComponent("json", isDirectory: true)
-            .path
-    }
-    var bloombergJSONPath: String { bloombergJSONDirectory }
     private(set) var marketWatchRetryCount: Int = 0
     private(set) var bloombergRetryCount: Int = 0
 
@@ -320,9 +355,15 @@ final class AppState: ObservableObject {
     private static let logOutputDirectoryKey = "logOutputDirectory"
     private static let bloombergUseReaderModeKey = "bloombergUseReaderMode"
     private static let bloombergBaseDirectoryKey = "bloombergBaseDirectory"
+    private static let bloombergHTMLDirectoryKey = "bloombergHTMLDirectory"
+    private static let bloombergJSONDirectoryKey = "bloombergJSONDirectory"
     private static let bloombergBodyBatchSizeKey = "bloombergBodyBatchSize"
     private static let bloombergBodyDelayMeanKey = "bloombergBodyTabDelaySeconds"
     private static let bloombergBodyDelayVariationKey = "bloombergBodyDelayVariationSeconds"
+    private static let bloombergBodyLongSleepEnabledKey = "bloombergBodyLongSleepEnabled"
+    private static let bloombergBodyLongSleepEveryKey = "bloombergBodyLongSleepEvery"
+    private static let bloombergBodyLongSleepJitterKey = "bloombergBodyLongSleepJitter"
+    private static let bloombergBodyLongSleepMinutesKey = "bloombergBodyLongSleepMinutes"
     private let bloombergIdScheme = "url-sha1@v1-canonical"
 
     init() {
@@ -332,9 +373,15 @@ final class AppState: ObservableObject {
         let legacyLog = UserDefaults.standard.string(forKey: Self.legacyLinksAggregatedDirectoryKey)
         let storedReaderMode = UserDefaults.standard.object(forKey: Self.bloombergUseReaderModeKey) as? Bool
         let storedBase = UserDefaults.standard.string(forKey: Self.bloombergBaseDirectoryKey)
+        let storedHTML = UserDefaults.standard.string(forKey: Self.bloombergHTMLDirectoryKey)
+        let storedJSON = UserDefaults.standard.string(forKey: Self.bloombergJSONDirectoryKey)
         let storedBodyBatchSize = UserDefaults.standard.object(forKey: Self.bloombergBodyBatchSizeKey) as? Int
         let storedBodyDelayMean = UserDefaults.standard.object(forKey: Self.bloombergBodyDelayMeanKey) as? Double
         let storedBodyDelayVariation = UserDefaults.standard.object(forKey: Self.bloombergBodyDelayVariationKey) as? Double
+        let storedBodyLongSleepEnabled = UserDefaults.standard.object(forKey: Self.bloombergBodyLongSleepEnabledKey) as? Bool
+        let storedBodyLongSleepEvery = UserDefaults.standard.object(forKey: Self.bloombergBodyLongSleepEveryKey) as? Int
+        let storedBodyLongSleepJitter = UserDefaults.standard.object(forKey: Self.bloombergBodyLongSleepJitterKey) as? Int
+        let storedBodyLongSleepMinutes = UserDefaults.standard.object(forKey: Self.bloombergBodyLongSleepMinutesKey) as? Double
         let rawDefaults = AppState.defaultBloombergRawDirectories()
 
         self.linksInputDirectory = storedInput?.isEmpty == false ? storedInput! : defaults.input
@@ -345,11 +392,34 @@ final class AppState: ObservableObject {
         } else {
             self.logOutputDirectory = defaults.output
         }
-        self.bloombergRawBaseDirectory = storedBase?.isEmpty == false ? storedBase! : rawDefaults.base
+        if let html = storedHTML, !html.isEmpty {
+            self.bloombergHTMLDirectory = html
+        } else if let base = storedBase, !base.isEmpty {
+            let derived = URL(fileURLWithPath: base, isDirectory: true)
+                .appendingPathComponent("html", isDirectory: true)
+                .path
+            self.bloombergHTMLDirectory = derived
+        } else {
+            self.bloombergHTMLDirectory = rawDefaults.html
+        }
+        if let json = storedJSON, !json.isEmpty {
+            self.bloombergJSONDirectory = json
+        } else if let base = storedBase, !base.isEmpty {
+            let derived = URL(fileURLWithPath: base, isDirectory: true)
+                .appendingPathComponent("json", isDirectory: true)
+                .path
+            self.bloombergJSONDirectory = derived
+        } else {
+            self.bloombergJSONDirectory = rawDefaults.json
+        }
         self.bloombergUseReaderMode = storedReaderMode ?? false
         self.bloombergBodyBatchSize = max(1, min(10, storedBodyBatchSize ?? 3))
         self.bloombergBodyDelayMean = max(0.1, min(10.0, storedBodyDelayMean ?? 1.0))
         self.bloombergBodyDelayVariation = max(0.0, min(5.0, storedBodyDelayVariation ?? 0.5))
+        self.bloombergBodyLongSleepEnabled = storedBodyLongSleepEnabled ?? false
+        self.bloombergBodyLongSleepEvery = max(1, min(500, storedBodyLongSleepEvery ?? 12))
+        self.bloombergBodyLongSleepJitter = max(0, min(200, storedBodyLongSleepJitter ?? 3))
+        self.bloombergBodyLongSleepMinutes = max(1.0, min(120.0, storedBodyLongSleepMinutes ?? 10.0))
 
         wireBindings()
         updateLinkOutputEnvironment()
@@ -363,6 +433,7 @@ final class AppState: ObservableObject {
         }
         initializeStatusLogFileIfNeeded()
         refreshBloombergParquetSources()
+        resetBloombergBodyLongSleepSchedule()
 
         Task { [weak self] in
             await self?.ensureWorkerWindowAvailability(bringFront: false)
@@ -671,8 +742,13 @@ final class AppState: ObservableObject {
     }
 
     func selectBloombergHTMLDirectory() {
-        guard let url = openDirectoryPanel(initialPath: bloombergRawBaseDirectory) else { return }
-        bloombergRawBaseDirectory = url.path
+        guard let url = openDirectoryPanel(initialPath: bloombergHTMLDirectory) else { return }
+        bloombergHTMLDirectory = url.path
+    }
+
+    func selectBloombergJSONDirectory() {
+        guard let url = openDirectoryPanel(initialPath: bloombergJSONDirectory) else { return }
+        bloombergJSONDirectory = url.path
     }
 
     func revealBloombergHTMLDirectory() {
@@ -747,6 +823,7 @@ final class AppState: ObservableObject {
                 return true
             }
             bloombergBodySourceURLs = filtered
+            resetBloombergBodyLongSleepSchedule()
             prefetchBloombergBodyTitles(for: filtered)
             Logger.shared.debug("Bloomberg URL を \(lines.count) 件読み込みました (\(knownURL.lastPathComponent)) / 処理対象 \(filtered.count) 件")
             if filtered.isEmpty {
@@ -791,9 +868,16 @@ final class AppState: ObservableObject {
                 Logger.shared.debug("Reader script output: \(message)")
                 if let html = await self.captureBloombergReaderHTML() {
                     Logger.shared.debug("Reader HTML captured (\(html.count) chars)")
+                    if let detection = self.robotDetectionReason(for: html) {
+                        self.handleRobotDetection(reason: detection.reason, htmlSize: detection.size, sourceURL: urlString)
+                        return
+                    }
+                    var savedSuccessfully = false
                     if let saved = self.saveBloombergPreviewHTML(html, sourceURL: urlString) {
+                        savedSuccessfully = true
                         await self.parseBloombergArticle(from: saved)
                     }
+                    await self.applyBloombergBodyLongSleepIfNeeded(afterSuccessfulSave: savedSuccessfully)
                     self.updateLiveStatus("Bloomberg 記事HTMLを取得しました (\(html.count) 文字)")
                 } else {
                     let errorMessage = "Reader HTML の取得に失敗しました"
@@ -916,6 +1000,7 @@ final class AppState: ObservableObject {
         }
         bloombergBodySourceURLs = pending
         bloombergBodyBatchRunning = true
+        resetBloombergBodyLongSleepSchedule()
         bloombergBodyBatchProcessed = 0
         bloombergBodyBatchFailed = 0
         bloombergBodyBatchTotal = pending.count
@@ -946,8 +1031,8 @@ final class AppState: ObservableObject {
         case failure(Error)
     }
 
-    private func runSafariReaderScript(with url: String, useReaderMode: Bool, tabDirective: ReaderTabDirective = .reuse) async -> ReaderScriptResult {
-        guard let scriptURL = Bundle.module.url(forResource: "SafariReader", withExtension: "applescript") else {
+    private func runSafariReaderScript(with url: String, useReaderMode: Bool, tabDirective: ReaderTabDirective = .reuse, waitForLoad: Bool = true) async -> ReaderScriptResult {
+        guard let scriptURL = Bundle.appResources.url(forResource: "SafariReader", withExtension: "applescript") else {
             return .failure(NSError(domain: "ReaderScript", code: -1, userInfo: [NSLocalizedDescriptionKey: "SafariReader.applescript が見つかりません"]))
         }
 
@@ -956,7 +1041,7 @@ final class AppState: ObservableObject {
         let windowName = safariController.workerWindowName
         let placeholder = safariController.workerPlaceholderURLString
         let windowId = safariController.workerWindowIdentifierArgument
-        process.arguments = [scriptURL.path, url, useReaderMode ? "reader" : "plain", windowName, placeholder, windowId, tabDirective.rawValue]
+        process.arguments = [scriptURL.path, url, useReaderMode ? "reader" : "plain", windowName, placeholder, windowId, tabDirective.rawValue, waitForLoad ? "wait" : "nowait"]
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -1053,14 +1138,14 @@ final class AppState: ObservableObject {
             if Task.isCancelled { break }
             guard let url = nextPendingURL() else { break }
             logBloombergAccess(for: url)
-            let result = await runSafariReaderScript(with: url, useReaderMode: bloombergUseReaderMode, tabDirective: .new)
+            let result = await runSafariReaderScript(with: url, useReaderMode: false, tabDirective: .new, waitForLoad: false)
             switch result {
             case .success(let message, let tabIndex):
                 guard let tabIndex else {
                     markBloombergBodyBatchCompletion(success: false, message: "タブ番号の取得に失敗しました (\(url))")
                     continue
                 }
-                slots.append(BloombergBodyFetchSlot(tabIndex: tabIndex, currentURL: url))
+                slots.append(BloombergBodyFetchSlot(tabIndex: tabIndex, currentURL: url, readyForCapture: false))
                 Logger.shared.debug("Bloomberg タブ \(tabIndex) を初期化: \(message)")
             case .failure(let error):
                 markBloombergBodyBatchCompletion(success: false, message: "タブ初期化に失敗: \(error.localizedDescription)")
@@ -1083,6 +1168,7 @@ final class AppState: ObservableObject {
         var interrupted = abortedDuringWarmup
         while !Task.isCancelled && !interrupted {
             var hadActiveSlot = false
+            var progressMade = false
             for index in slots.indices {
                 if Task.isCancelled { interrupted = true; break }
                 var slot = slots[index]
@@ -1092,19 +1178,47 @@ final class AppState: ObservableObject {
                 guard safariController.setCurrentTab(index: slot.tabIndex) else {
                     markBloombergBodyBatchCompletion(success: false, message: "タブ \(slot.tabIndex) を選択できませんでした")
                     slot.currentURL = nil
+                    slot.readyForCapture = false
                     slots[index] = slot
                     continue
                 }
 
-                if let html = await captureBloombergReaderHTML(),
-                   let saved = saveBloombergPreviewHTML(html, sourceURL: currentURL) {
-                    await parseBloombergArticle(from: saved)
-                    markBloombergBodyBatchCompletion(success: true)
+                if !slot.readyForCapture {
+                    if await safariController.waitForDocumentReadyState(timeout: 0.6) {
+                        if bloombergUseReaderMode {
+                            await safariController.enableReaderMode()
+                        }
+                        slot.readyForCapture = true
+                    } else {
+                        slots[index] = slot
+                        continue
+                    }
+                }
+
+                if let html = await captureBloombergReaderHTML() {
+                    if let detection = robotDetectionReason(for: html) {
+                        handleRobotDetection(reason: detection.reason, htmlSize: detection.size, sourceURL: currentURL)
+                        interrupted = true
+                        break
+                    }
+                    if let saved = saveBloombergPreviewHTML(html, sourceURL: currentURL) {
+                        await parseBloombergArticle(from: saved)
+                        markBloombergBodyBatchCompletion(success: true)
+                        await applyBloombergBodyLongSleepIfNeeded(afterSuccessfulSave: true)
+                    } else {
+                        markBloombergBodyBatchCompletion(success: false, message: "HTML 取得に失敗しました (\(currentURL))")
+                    }
+                    progressMade = true
+                    slot.currentURL = nil
+                    slot.readyForCapture = false
+                    slots[index] = slot
                 } else {
                     markBloombergBodyBatchCompletion(success: false, message: "HTML 取得に失敗しました (\(currentURL))")
+                    progressMade = true
+                    slot.currentURL = nil
+                    slot.readyForCapture = false
+                    slots[index] = slot
                 }
-                slot.currentURL = nil
-                slots[index] = slot
 
                 if Task.isCancelled { break }
 
@@ -1117,6 +1231,7 @@ final class AppState: ObservableObject {
                             interrupted = true
                             break
                         }
+                        progressMade = true
                     } else {
                         markBloombergBodyBatchCompletion(success: false, message: "タブ \(slot.tabIndex) への再読み込みに失敗しました (\(nextURL))")
                         slots[index] = slot
@@ -1128,6 +1243,10 @@ final class AppState: ObservableObject {
 
             if interrupted {
                 break
+            }
+
+            if !progressMade {
+                try? await Task.sleep(nanoseconds: 150_000_000)
             }
 
             if queue.isEmpty && !hadActiveSlot {
@@ -1162,13 +1281,14 @@ final class AppState: ObservableObject {
     private func loadBloombergBodyURL(_ url: String, into slot: inout BloombergBodyFetchSlot) async -> Bool {
         guard safariController.setCurrentTab(index: slot.tabIndex) else { return false }
         logBloombergAccess(for: url)
-        let result = await runSafariReaderScript(with: url, useReaderMode: bloombergUseReaderMode, tabDirective: .reuse)
+        let result = await runSafariReaderScript(with: url, useReaderMode: false, tabDirective: .reuse, waitForLoad: false)
         switch result {
         case .success(_, let tabIndex):
             if let tabIndex {
                 slot.tabIndex = tabIndex
             }
             slot.currentURL = url
+            slot.readyForCapture = false
             return true
         case .failure(let error):
             let message = "タブ \(slot.tabIndex) の読み込みに失敗: \(error.localizedDescription)"
@@ -1853,6 +1973,90 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func robotDetectionReason(for html: String) -> (reason: String, size: Int)? {
+        let byteCount = html.utf8.count
+        let lowercased = html.lowercased()
+        let keywordHits = [
+            "are you a robot",
+            "robot check",
+            "unusual activity",
+            "enable javascript"
+        ]
+        let hasRobotKeyword = keywordHits.contains { lowercased.contains($0) }
+        let isSmall = byteCount <= robotHTMLSizeThresholdBytes
+        let missingNextData = !lowercased.contains("__next_data__")
+
+        if hasRobotKeyword {
+            return ("ロボット検知ページのキーワードを検出", byteCount)
+        }
+
+        if isSmall {
+            let sizeNote = String(format: "%.1f", Double(byteCount) / 1024.0)
+            let threshold = String(format: "%.1f", Double(robotHTMLSizeThresholdBytes) / 1024.0)
+            let detail = missingNextData ? " (記事データタグなし)" : ""
+            return ("HTML サイズが \(sizeNote) KB と閾値 (\(threshold) KB) 未満\(detail)", byteCount)
+        }
+
+        return nil
+    }
+
+    @MainActor
+    private func handleRobotDetection(reason: String, htmlSize: Int, sourceURL: String?) {
+        let sizeKB = Double(htmlSize) / 1024.0
+        let urlNote = sourceURL ?? "URL 未指定"
+        let message = "ロボット検知ページを検出しました (\(String(format: "%.1f", sizeKB)) KB, \(urlNote))。本文取得を停止します (\(reason))"
+        bloombergBodyLoadError = message
+        if bloombergBodyBatchRunning {
+            bloombergBodyBatchLastError = message
+            bloombergBodyBatchRunning = false
+            bloombergBodyBatchTask?.cancel()
+        }
+        prependStatusMessage(message)
+        updateLiveStatus("ロボット検知のため本文取得停止")
+    }
+
+    private func computeNextBloombergBodyLongSleep() -> Int {
+        let base = max(1, bloombergBodyLongSleepEvery)
+        let jitter = max(0, bloombergBodyLongSleepJitter)
+        let lower = max(1, base - jitter)
+        let upper = max(lower, base + jitter)
+        return Int.random(in: lower...upper)
+    }
+
+    private func resetBloombergBodyLongSleepSchedule() {
+        bloombergBodyLongSleepCounter = 0
+        bloombergBodyNextLongSleep = computeNextBloombergBodyLongSleep()
+    }
+
+    @MainActor
+    private func applyBloombergBodyLongSleepIfNeeded(afterSuccessfulSave: Bool) async {
+        guard bloombergBodyLongSleepEnabled else { return }
+        guard afterSuccessfulSave else { return }
+
+        bloombergBodyLongSleepCounter += 1
+        guard bloombergBodyLongSleepCounter >= max(1, bloombergBodyNextLongSleep) else { return }
+
+        let minutes = max(0.0, bloombergBodyLongSleepMinutes)
+        let seconds = minutes * 60.0
+        if seconds <= 0 {
+            resetBloombergBodyLongSleepSchedule()
+            return
+        }
+
+        let formattedMinutes = String(format: "%.1f", minutes)
+        prependStatusMessage("Bloomberg 本文取得で \(formattedMinutes) 分の休止を挿入します (\(bloombergBodyLongSleepCounter) 件処理)")
+        updateLiveStatus("Bloomberg 本文取得を \(formattedMinutes) 分休止中")
+
+        do {
+            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            prependStatusMessage("休止が完了しました。本文取得を再開します")
+        } catch {
+            prependStatusMessage("長期休止はキャンセルされました")
+        }
+
+        resetBloombergBodyLongSleepSchedule()
+    }
+
     @MainActor
     private func captureBloombergReaderHTML(timeout: TimeInterval = 15.0, pollInterval: TimeInterval = 0.25) async -> String? {
         let deadline = Date().addingTimeInterval(timeout)
@@ -2054,7 +2258,6 @@ final class AppState: ObservableObject {
     }
 
     private func ensureBloombergRawDirectories() {
-        ensureDirectoryExists(at: bloombergRawBaseDirectory)
         ensureDirectoryExists(at: bloombergHTMLDirectory)
         ensureDirectoryExists(at: bloombergJSONDirectory)
     }

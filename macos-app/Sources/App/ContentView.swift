@@ -144,6 +144,37 @@ struct ContentView: View {
                             .frame(width: 80)
                     }
                 }
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle("本文取得に長期スリープを挿入する", isOn: $appState.bloombergBodyLongSleepEnabled)
+                    HStack {
+                        Text("n 件ごとに休止")
+                        Spacer()
+                        TextField("n", value: $appState.bloombergBodyLongSleepEvery, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 80)
+                            .disabled(!appState.bloombergBodyLongSleepEnabled)
+                    }
+                    HStack {
+                        Text("± m 件のゆらぎ")
+                        Spacer()
+                        TextField("m", value: $appState.bloombergBodyLongSleepJitter, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 80)
+                            .disabled(!appState.bloombergBodyLongSleepEnabled)
+                    }
+                    HStack {
+                        Text("休止時間 (分)")
+                        Spacer()
+                        TextField("分", value: $appState.bloombergBodyLongSleepMinutes, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 80)
+                            .disabled(!appState.bloombergBodyLongSleepEnabled)
+                    }
+                    Text("n±m 件保存するたびに T 分休止してロボット検知を避けます。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 Text("リンク取得と同様に平均±変動の範囲でランダムな待機を挟みつつ、指定タブ数で順番に本文を取得します。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -172,26 +203,17 @@ struct ContentView: View {
                 Divider()
 
                 editableStorageRow(
-                    title: "Bloomberg 保存先 (ベース)",
-                    path: $appState.bloombergRawBaseDirectory,
+                    title: "Bloomberg HTML 保存先",
+                    path: $appState.bloombergHTMLDirectory,
                     chooseAction: appState.selectBloombergHTMLDirectory,
                     revealAction: appState.revealBloombergHTMLDirectory
                 )
 
-                storageRow(
-                    title: "HTML 実際の保存先",
-                    path: appState.bloombergHTMLPath,
-                    chooseAction: {},
-                    revealAction: appState.revealBloombergHTMLDirectory,
-                    showButtons: false
-                )
-
-                storageRow(
-                    title: "JSON 実際の保存先",
-                    path: appState.bloombergJSONPath,
-                    chooseAction: {},
-                    revealAction: appState.revealBloombergJSONDirectory,
-                    showButtons: false
+                editableStorageRow(
+                    title: "Bloomberg JSON 保存先",
+                    path: $appState.bloombergJSONDirectory,
+                    chooseAction: appState.selectBloombergJSONDirectory,
+                    revealAction: appState.revealBloombergJSONDirectory
                 )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -870,6 +892,9 @@ struct ContentView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+
+                statusBox
+                statusHistoryBox
 
                 GroupBox("解析済みプレビュー") {
                     if let article = appState.bloombergParsedArticle {

@@ -25,6 +25,11 @@ on run argv
     if (count of argv) >= 6 then
         set tabDirective to item 6 of argv
     end if
+    set waitMode to "wait"
+    if (count of argv) >= 7 then
+        set waitMode to item 7 of argv
+    end if
+    set shouldWaitForLoad to (waitMode is not "nowait")
 
     tell application "Safari"
         activate
@@ -89,31 +94,37 @@ on run argv
         end try
     end tell
 
-    repeat 60 times
-        delay 0.5
-        try
-            tell application "Safari"
-                tell window 1
-                    tell current tab
-                        set readyState to do JavaScript "document.readyState"
-                        if readyState is "complete" then exit repeat
+    if shouldWaitForLoad then
+        repeat 60 times
+            delay 0.5
+            try
+                tell application "Safari"
+                    tell window 1
+                        tell current tab
+                            set readyState to do JavaScript "document.readyState"
+                            if readyState is "complete" then exit repeat
+                        end tell
                     end tell
                 end tell
-            end tell
-        end try
-    end repeat
+            end try
+        end repeat
 
-    delay 0.5
+        delay 0.5
+    end if
 
     set resultMessage to ""
-    if mode is "reader" then
+    if mode is "reader" and shouldWaitForLoad then
         tell application "System Events"
             keystroke "r" using {command down, shift down}
         end tell
         delay 1
         set resultMessage to "Reader shortcut sent"
+    else if mode is "reader" then
+        set resultMessage to "Reader mode postponed"
     else
-        delay 0.5
+        if shouldWaitForLoad then
+            delay 0.5
+        end if
         set resultMessage to "Reader mode skipped"
     end if
     return "TABINDEX=" & (tabIndex as string) & ";MESSAGE=" & resultMessage
